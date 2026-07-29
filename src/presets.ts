@@ -14,5 +14,6 @@ export const PRESETS: Record<MetricPreset, Required<Pick<MetricConfig, "icon" | 
 export const presetMetric = (preset: MetricPreset = "temperature"): MetricConfig => ({
   preset,
   ...PRESETS[preset],
+  ...(["temperature", "humidity", "lights", "power", "co2"].includes(preset) ? { source: "area" as const } : {}),
   hide_unavailable: true,
 });

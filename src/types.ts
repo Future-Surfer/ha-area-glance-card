@@ -32,7 +32,9 @@ export interface ActionConfig {
 }
 
 export interface StatusConfig {
+  source?: "area_motion" | "entity";
   entity?: string;
+  area?: string;
   active_text?: string;
   inactive_text?: string;
   active_color?: string;
@@ -43,6 +45,7 @@ export interface StatusConfig {
 
 export interface MetricConfig extends ActionConfig {
   preset?: MetricPreset;
+  source?: "area" | "entity";
   entity?: string;
   area?: string;
   domain?: string;
