@@ -5,8 +5,18 @@ export type MetricPreset =
   | "power"
   | "battery"
   | "co2"
+  | "motion"
+  | "presence"
+  | "doors"
+  | "windows"
+  | "leaks"
+  | "people_home"
+  /** Legacy name retained so existing configurations continue to work. */
+  | "occupancy"
   | "device"
   | "custom";
+
+export type AreaSignal = "motion" | "presence" | "doors" | "windows" | "leaks";
 
 export interface EntityState {
   state: string;
@@ -32,7 +42,7 @@ export interface ActionConfig {
 }
 
 export interface StatusConfig {
-  source?: "area_motion" | "entity";
+  source?: "area_motion" | "area_presence" | "area_doors" | "area_windows" | "area_leaks" | "entity";
   entity?: string;
   area?: string;
   active_text?: string;

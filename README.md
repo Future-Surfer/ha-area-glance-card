@@ -15,7 +15,9 @@ Area Glance turns the sensors and devices assigned to a Home Assistant area into
 3. Leave **Starter profile** on **Auto**, then choose an area. Its useful metrics populate automatically.
 4. Swap any slot, choose one specific entity instead, or adjust the card’s layout and appearance whenever you like.
 
-The card aggregates compatible sensors in an area: motion status, median temperature and humidity, lights on/total, summed live power, and the highest CO2 reading. It also has sensible profiles for media rooms, energy, batteries/garages, and a house-wide view.
+The card aggregates compatible sensors in an area: median temperature and humidity, lights on/total, summed live power, CO2, motion, presence, doors, windows and water leaks. Whole-home cards can show **People home** from Home Assistant's Home zone; room **Presence** is kept separate, so it never implies that someone is home.
+
+Need something more specific? Swap a slot to **A specific entity** and choose a media player, robot vacuum, weather, climate, battery sensor, or any other entity. The card applies sensible labels and icons for common device types, while the advanced controls remain there when you need them.
 
 If HACS does not add the dashboard resource itself, add:
 

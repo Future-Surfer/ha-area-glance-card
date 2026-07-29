@@ -1,9 +1,27 @@
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { PRESETS, presetMetric } from "./presets";
-import type { ActionConfig, AreaGlanceConfig, EntityState, HassLike, MetricConfig, MetricPreset, StatusConfig } from "./types";
+import type { ActionConfig, AreaGlanceConfig, AreaSignal, EntityState, HassLike, MetricConfig, MetricPreset, StatusConfig } from "./types";
 
 const UNAVAILABLE = new Set(["unknown", "unavailable", "none", ""]);
 const DEFAULT_METRICS = [presetMetric("temperature"), presetMetric("lights"), presetMetric("power"), presetMetric("device")];
+const AREA_SIGNAL_PRESETS = new Set<MetricPreset>(["motion", "presence", "doors", "windows", "leaks"]);
+const AUTOMATIC_METRIC_PRESETS: MetricPreset[] = ["temperature", "humidity", "lights", "power", "co2", "motion", "presence", "doors", "windows", "leaks"];
+const DEVICE_METRIC_PRESETS: MetricPreset[] = ["people_home", "battery", "device", "custom"];
+const AREA_STATUS_SOURCES: Record<AreaSignal, StatusConfig["source"]> = {
+  motion: "area_motion",
+  presence: "area_presence",
+  doors: "area_doors",
+  windows: "area_windows",
+  leaks: "area_leaks",
+};
+const statusSignal = (source: StatusConfig["source"]): AreaSignal | undefined => {
+  if (source === "area_motion") return "motion";
+  if (source === "area_presence") return "presence";
+  if (source === "area_doors") return "doors";
+  if (source === "area_windows") return "windows";
+  if (source === "area_leaks") return "leaks";
+  return undefined;
+};
 const SLOT_HELPERS: Record<MetricPreset, string> = {
   temperature: "Use the median of area temperature sensors, or one chosen sensor.",
   humidity: "Use the median of area humidity sensors, or one chosen sensor.",
@@ -11,7 +29,14 @@ const SLOT_HELPERS: Record<MetricPreset, string> = {
   power: "Sum compatible live power sensors in an area, or use one sensor.",
   battery: "Show a battery percentage with sensible colour thresholds.",
   co2: "Show a CO₂ reading from one entity.",
-  device: "Show the state of a device entity.",
+  motion: "Show whether there is motion now, or when motion was last seen in this area.",
+  presence: "Show whether any area presence sensor reports the room as occupied.",
+  doors: "Count compatible area doors and garage doors that are open.",
+  windows: "Count compatible area window sensors that are open.",
+  leaks: "Show Dry until any compatible area water-leak sensor reports a leak.",
+  people_home: "Show the current count from Home Assistant's Home zone.",
+  occupancy: "Show the state of one chosen occupancy helper (legacy option).",
+  device: "Choose any entity. The card uses a helpful icon and label for common devices.",
   custom: "Show an entity using its native state and unit.",
 };
 const HEIGHT_OPTIONS = {
@@ -34,6 +59,18 @@ const asNumber = (value: string): number | undefined => {
 
 const friendlyState = (state: string) => state.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 
+const friendlyDeviceState = (domain: string | undefined, state: string): string => {
+  if (domain === "weather") {
+    const weatherStates: Record<string, string> = { "clear-night": "Clear night", cloudy: "Cloudy", exceptional: "Exceptional", fog: "Fog", hail: "Hail", lightning: "Lightning", "lightning-rainy": "Stormy", partlycloudy: "Partly cloudy", pouring: "Pouring", rainy: "Rainy", snowy: "Snowy", "snowy-rainy": "Sleet", sunny: "Sunny", windy: "Windy", "windy-variant": "Windy" };
+    return weatherStates[state] ?? friendlyState(state);
+  }
+  if (domain === "climate") {
+    const climateStates: Record<string, string> = { heat: "Heating", cool: "Cooling", "heat_cool": "Heat/cool", dry: "Drying", fan_only: "Fan", auto: "Auto", off: "Off" };
+    return climateStates[state] ?? friendlyState(state);
+  }
+  return friendlyState(state);
+};
+
 const stateAge = (lastChanged: string): string => {
   const minutes = Math.max(0, Math.round((Date.now() - new Date(lastChanged).getTime()) / 60000));
   if (minutes < 1) return "now";
@@ -42,6 +79,38 @@ const stateAge = (lastChanged: string): string => {
   return `${Math.round(minutes / 1440)}d ago`;
 };
 
+const isDoorEntity = (entityId: string, state?: EntityState): boolean => {
+  const deviceClass = String(state?.attributes.device_class ?? "");
+  if (entityId.startsWith("binary_sensor.")) return ["door", "garage_door", "opening"].includes(deviceClass);
+  if (entityId.startsWith("cover.")) return ["door", "garage"].includes(deviceClass) || /(^|_)(door|garage)(_|$)/.test(entityId);
+  return false;
+};
+
+const isDoorOpen = (entityId: string, state: EntityState): boolean =>
+  entityId.startsWith("cover.") ? ["open", "opening"].includes(state.state) : state.state === "on";
+
+const shortDoorName = (name: string): string => name.replace(/\s+(door|contact|sensor|opening)$/i, "");
+
+const isWindowEntity = (entityId: string, state?: EntityState): boolean => {
+  const deviceClass = String(state?.attributes.device_class ?? "");
+  if (entityId.startsWith("binary_sensor.")) return deviceClass === "window";
+  if (entityId.startsWith("cover.")) return deviceClass === "window" || /(^|_)window(_|$)/.test(entityId);
+  return false;
+};
+
+const isSignalEntity = (signal: AreaSignal, entityId: string, state?: EntityState): boolean => {
+  if (!state) return false;
+  const deviceClass = String(state.attributes.device_class ?? "");
+  if (signal === "motion") return entityId.startsWith("binary_sensor.") && deviceClass === "motion";
+  if (signal === "presence") return entityId.startsWith("binary_sensor.") && ["occupancy", "presence"].includes(deviceClass);
+  if (signal === "doors") return isDoorEntity(entityId, state);
+  if (signal === "windows") return isWindowEntity(entityId, state);
+  return entityId.startsWith("binary_sensor.") && deviceClass === "moisture";
+};
+
+const isSignalActive = (signal: AreaSignal, entityId: string, state: EntityState): boolean =>
+  signal === "doors" || signal === "windows" ? isDoorOpen(entityId, state) : state.state === "on";
+
 interface MetricDisplay {
   icon: string;
   color?: string;
@@ -49,6 +118,12 @@ interface MetricDisplay {
   label: string;
   entities?: string[];
   aggregate?: boolean;
+}
+
+interface AreaSignalSummary {
+  entities: { entityId: string; state: EntityState }[];
+  active: { entityId: string; state: EntityState }[];
+  latest?: EntityState;
 }
 
 interface DetailSheet {
@@ -112,14 +187,43 @@ export class AreaGlanceCard extends LitElement {
   }
 
   private _metricSource(metric: MetricConfig, preset: MetricPreset): "area" | "entity" {
-    if (preset === "lights") return "area";
+    if (preset === "lights" || AREA_SIGNAL_PRESETS.has(preset)) return "area";
     return metric.source ?? (metric.entity ? "entity" : ["temperature", "humidity", "power", "co2"].includes(preset) ? "area" : "entity");
+  }
+
+  private _areaSignalSummary(area: string | undefined, signal: AreaSignal): AreaSignalSummary {
+    const entities = this._areaEntities(area)
+      .map((entityId) => ({ entityId, state: this.hass?.states[entityId] }))
+      .filter((entry): entry is { entityId: string; state: EntityState } => entry.state !== undefined && !UNAVAILABLE.has(entry.state.state) && isSignalEntity(signal, entry.entityId, entry.state));
+    const active = entities.filter((entry) => isSignalActive(signal, entry.entityId, entry.state));
+    const latest = entities.reduce<EntityState | undefined>((newest, entry) => !newest || new Date(entry.state.last_changed) > new Date(newest.last_changed) ? entry.state : newest, undefined);
+    return { entities, active, latest };
+  }
+
+  private _areaSignalMetric(metric: MetricConfig, signal: AreaSignal, label: string, icon: string): MetricDisplay {
+    const area = metric.area ?? this._config?.area;
+    const color = metric.color ?? PRESETS[signal].color;
+    if (!area && this._config?.profile !== "house") return { icon, color, value: "–", label };
+    const summary = this._areaSignalSummary(area, signal);
+    if (!summary.entities.length) return { icon, color, value: "–", label };
+    const entityIds = summary.entities.map((entry) => entry.entityId);
+    if (signal === "motion") {
+      if (summary.active.length) return { icon, color: metric.color ?? "var(--amber-color, #ff9800)", value: "Active", label, entities: entityIds, aggregate: true };
+      return { icon, color, value: summary.latest ? stateAge(summary.latest.last_changed).replace(" ago", "") : "–", label: "Last motion", entities: entityIds, aggregate: true };
+    }
+    if (signal === "presence") return { icon, color, value: summary.active.length ? "Occupied" : "Clear", label, entities: entityIds, aggregate: true };
+    if (signal === "leaks") {
+      return { icon, color: metric.color ?? (summary.active.length ? "var(--error-color, #db4437)" : "var(--success-color, #2eaa45)"), value: summary.active.length ? "Leak!" : "Dry", label, entities: entityIds, aggregate: true };
+    }
+    const noun = signal === "doors" ? "Doors" : "Windows";
+    return { icon, color: metric.color ?? (summary.active.length ? "var(--warning-color, #e0af00)" : "var(--success-color, #2eaa45)"), value: summary.active.length ? `${summary.active.length} open` : "Closed", label: metric.label ?? noun, entities: entityIds, aggregate: true };
   }
 
   private _areaMetric(metric: MetricConfig, preset: MetricPreset, label: string, icon: string): MetricDisplay {
     const area = metric.area ?? this._config?.area;
     const color = metric.color ?? PRESETS[preset].color;
     if (!area && this._config?.profile !== "house") return { icon, color, value: "–", label };
+    if (AREA_SIGNAL_PRESETS.has(preset)) return this._areaSignalMetric(metric, preset as AreaSignal, label, icon);
     if (preset === "lights") {
       const lights = this._areaEntities(area, metric.domain ?? "light");
       const on = lights.filter((id) => this.hass?.states[id]?.state === "on").length;
@@ -164,8 +268,18 @@ export class AreaGlanceCard extends LitElement {
     const defaults = PRESETS[preset];
     const state = metric.entity ? this.hass?.states[metric.entity] : undefined;
     if (metric.hide_unavailable && state && UNAVAILABLE.has(state.state)) return undefined;
-    const label = metric.label ?? defaults.label;
-    const icon = metric.icon ?? defaults.icon;
+    const entityDomain = metric.entity?.split(".")[0];
+    const devicePresentation = entityDomain === "media_player" ? { icon: "mdi:television", label: "Media" }
+      : entityDomain === "vacuum" ? { icon: "mdi:robot-vacuum", label: "Vacuum" }
+      : entityDomain === "weather" ? { icon: "mdi:weather-partly-cloudy", label: "Weather" }
+      : entityDomain === "climate" ? { icon: "mdi:thermostat", label: "Climate" }
+      : undefined;
+    const label = preset === "device" && (!metric.label || metric.label === defaults.label)
+      ? devicePresentation?.label ?? defaults.label
+      : metric.label ?? defaults.label;
+    const icon = preset === "device" && (!metric.icon || metric.icon === defaults.icon)
+      ? devicePresentation?.icon ?? String(state?.attributes.icon ?? defaults.icon)
+      : metric.icon ?? defaults.icon;
 
     if (this._metricSource(metric, preset) === "area") return this._areaMetric(metric, preset, label, icon);
     if (!state || UNAVAILABLE.has(state.state)) return { icon, color: metric.color ?? defaults.color, value: "–", label };
@@ -179,8 +293,10 @@ export class AreaGlanceCard extends LitElement {
       const inferredUnit = typeof state.attributes.unit_of_measurement === "string" ? state.attributes.unit_of_measurement : "";
       const unit = metric.unit ?? (format === "temperature" ? "°" : format === "percent" ? "%" : inferredUnit);
       value = `${rendered}${unit}`;
+    } else if ((preset === "occupancy" || preset === "people_home") && ["on", "off"].includes(state.state)) {
+      value = state.state === "on" ? "Home" : "Away";
     } else {
-      value = this.hass?.formatEntityState?.(state) ?? friendlyState(state.state);
+      value = preset === "device" ? friendlyDeviceState(entityDomain, state.state) : this.hass?.formatEntityState?.(state) ?? friendlyState(state.state);
     }
     let color = metric.color ?? defaults.color;
     if (!metric.color && preset === "battery" && number !== undefined) {
@@ -190,24 +306,46 @@ export class AreaGlanceCard extends LitElement {
   }
 
   private _status() {
-    const config = this._config?.status;
-    if (config?.source === "area_motion") {
+    const configuredStatus = this._config?.status;
+    const config = configuredStatus ?? {};
+    const signal = statusSignal(config?.source);
+    if (signal === "motion") {
       const area = config.area ?? this._config?.area;
       if (!area && this._config?.profile !== "house") return { line: "", age: "", color: "var(--disabled-text-color)" };
-      const motions = this._areaEntities(area, "binary_sensor")
-        .map((entityId) => this.hass?.states[entityId])
-        .filter((state): state is EntityState => state?.attributes.device_class === "motion" && !UNAVAILABLE.has(state.state));
-      if (!motions.length) return { line: "", age: "", color: "var(--disabled-text-color)" };
-      const active = motions.some((state) => state.state === "on");
-      const latest = motions.reduce((newest, state) => new Date(state.last_changed) > new Date(newest.last_changed) ? state : newest);
+      const summary = this._areaSignalSummary(area, signal);
+      if (!summary.entities.length || !summary.latest) return { line: "", age: "", color: "var(--disabled-text-color)" };
+      const active = Boolean(summary.active.length);
       return {
         line: !active && config.show_last_changed ? (config.last_changed_text ?? "Last motion") : active ? (config.active_text ?? "Motion") : (config.inactive_text ?? "No motion"),
-        age: config.show_last_changed ? stateAge(latest.last_changed) : "",
+        age: config.show_last_changed ? stateAge(summary.latest.last_changed) : "",
         color: active ? (config.active_color ?? "var(--error-color, #db4437)") : (config.inactive_color ?? "var(--success-color, #2eaa45)"),
       };
     }
+    if (signal === "doors") {
+      const area = config.area ?? this._config?.area;
+      if (!area && this._config?.profile !== "house") return { line: "", age: "", color: "var(--disabled-text-color)" };
+      const summary = this._areaSignalSummary(area, signal);
+      if (!summary.entities.length) return { line: "", age: "", color: "var(--disabled-text-color)" };
+      const color = summary.active.length ? (config.active_color ?? "var(--warning-color, #e0af00)") : (config.inactive_color ?? "var(--success-color, #2eaa45)");
+      if (!summary.active.length) return { line: config.inactive_text ?? "All doors", age: "closed", color };
+      if (summary.active.length === 1) return { line: this._entityName(summary.active[0].entityId), age: "open", color };
+      return { line: `${summary.active.length} doors open`, age: summary.active.map((door) => shortDoorName(this._entityName(door.entityId))).join(", "), color };
+    }
+    if (signal === "presence") {
+      const summary = this._areaSignalSummary(config.area ?? this._config?.area, signal);
+      if (!summary.entities.length) return { line: "", age: "", color: "var(--disabled-text-color)" };
+      const active = Boolean(summary.active.length);
+      return { line: active ? (config.active_text ?? "Occupied") : (config.inactive_text ?? "Clear"), age: "", color: active ? (config.active_color ?? "var(--success-color, #2eaa45)") : (config.inactive_color ?? "var(--disabled-text-color)") };
+    }
+    if (signal === "windows" || signal === "leaks") {
+      const summary = this._areaSignalSummary(config.area ?? this._config?.area, signal);
+      if (!summary.entities.length) return { line: "", age: "", color: "var(--disabled-text-color)" };
+      const active = Boolean(summary.active.length);
+      const activeText = signal === "windows" ? `${summary.active.length} window${summary.active.length === 1 ? "" : "s"} open` : summary.active.length > 1 ? `${summary.active.length} leaks` : "Leak detected";
+      return { line: active ? (config.active_text ?? activeText) : (config.inactive_text ?? (signal === "windows" ? "All windows" : "No leaks")), age: active ? "" : (signal === "windows" ? "closed" : "dry"), color: active ? (config.active_color ?? (signal === "leaks" ? "var(--error-color, #db4437)" : "var(--warning-color, #e0af00)")) : (config.inactive_color ?? "var(--success-color, #2eaa45)") };
+    }
     const state = config?.entity ? this.hass?.states[config.entity] : undefined;
-    if (!config || !state) return { line: "", age: "", color: "var(--disabled-text-color)" };
+    if (!configuredStatus || !state) return { line: "", age: "", color: "var(--disabled-text-color)" };
     const active = !["off", "not_home", "closed", "unoccupied", "unavailable", "unknown"].includes(state.state);
     const isMotion = state.attributes.device_class === "motion";
     const inactiveHistoryText = config.last_changed_text ?? (isMotion ? "Last motion" : "Last active");
@@ -373,7 +511,7 @@ export class AreaGlanceCard extends LitElement {
     .detail-entity strong, .detail-entity small { display:block; }
     .detail-entity small { margin-top:2px; color:var(--secondary-text-color); font-size:.75rem; }
     .detail-state { color:var(--secondary-text-color); white-space:nowrap; font-size:.86rem; }
-    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:minmax(104px, 1.35fr) minmax(0, 4fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.5rem); } .status { font-size:min(var(--area-glance-status-size, .85rem), .78rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .value { font-size:min(var(--area-glance-value-size, 1.6rem), 1.1rem); } .label { font-size:min(var(--area-glance-label-size, .82rem), .64rem); margin-top:1px; } }
+    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:minmax(100px, 1.25fr) minmax(0, 4fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.35rem); } .status { font-size:min(var(--area-glance-status-size, .85rem), .76rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 20px); height:min(var(--area-glance-icon-size, 24px), 20px); margin-bottom:1px; } .value { font-size:min(var(--area-glance-value-size, 1.6rem), .88rem); } .label { font-size:min(var(--area-glance-label-size, .82rem), .58rem); margin-top:1px; } }
   `;
 }
 
@@ -395,8 +533,8 @@ export class AreaGlanceCardEditor extends LitElement {
   private _statusInput(event: Event, key: keyof StatusConfig) { this._change({ status: { ...this._config.status, [key]: (event.target as HTMLInputElement).value } }); }
   private _statusBoolean(event: Event, key: keyof StatusConfig) { this._change({ status: { ...this._config.status, [key]: (event.target as HTMLInputElement).checked } }); }
   private _statusSourceChanged(event: Event) {
-    const source = (event.target as HTMLSelectElement).value as "area_motion" | "entity";
-    this._change({ status: { ...this._config.status, source, ...(source === "area_motion" ? { entity: undefined } : {}) } });
+    const source = (event.target as HTMLSelectElement).value as NonNullable<StatusConfig["source"]>;
+    this._change({ status: { ...this._config.status, source, ...(source === "entity" ? {} : { entity: undefined }) } });
   }
   private _statusEnabledChanged(event: Event) {
     const enabled = (event.target as HTMLInputElement).checked;
@@ -484,6 +622,8 @@ export class AreaGlanceCardEditor extends LitElement {
     const co2 = first((id) => hasDeviceClass(id, "carbon_dioxide") || /(^|_)(co2|carbon_dioxide)(_|$)/.test(id));
     const power = first(isPower);
     const battery = first((id) => hasDeviceClass(id, "battery"));
+    const homeZone = state("zone.home") && asNumber(state("zone.home")?.state ?? "") !== undefined ? "zone.home" : undefined;
+    const presence = first((id) => isSignalEntity("presence", id, state(id)));
     const media = first((id) => id.startsWith("media_player."));
     const device = media ?? first((id) => id.startsWith("switch.") || id.startsWith("fan.") || id.startsWith("climate."));
     const solar = first((id) => isPower(id) && /(solar|generation|pv)/.test(id));
@@ -507,6 +647,14 @@ export class AreaGlanceCardEditor extends LitElement {
       addAreaMetric("power", Boolean(power));
       addAreaMetric("co2", Boolean(co2));
       addAreaMetric("humidity", Boolean(humidity));
+    } else if (profile === "house") {
+      const outsideTemperature = first((id) => hasDeviceClass(id, "temperature") && /(outside|outdoor|exterior)/.test(id));
+      const insideTemperature = first((id) => hasDeviceClass(id, "temperature") && id !== outsideTemperature) ?? temperature;
+      addEntityMetric("temperature", insideTemperature, { label: "Inside", icon: "mdi:home-thermometer" });
+      addEntityMetric("temperature", outsideTemperature, { label: "Outside", icon: "mdi:thermometer-lines" });
+      addAreaMetric("lights", Boolean(first((id) => id.startsWith("light."))));
+      addEntityMetric("people_home", homeZone, { label: "People home" });
+      addAreaMetric("power", Boolean(power));
     } else {
       addAreaMetric("temperature", Boolean(temperature));
       addAreaMetric("lights", Boolean(first((id) => id.startsWith("light."))));
@@ -515,13 +663,14 @@ export class AreaGlanceCardEditor extends LitElement {
       addAreaMetric("power", Boolean(power));
       if (profile === "room") addEntityMetric("device", device);
     }
-    const motion = first((id) => id.startsWith("binary_sensor.") && hasDeviceClass(id, "motion"));
+    const motion = first((id) => isSignalEntity("motion", id, state(id)));
+    const door = first((id) => isDoorEntity(id, state(id)));
     this._suggestionsNeedUpdate = false;
     this._change({
       area: area || undefined,
       profile: requestedProfile,
       title: this._config.layout === "metrics-only" ? this._config.title : profile === "house" ? "House" : this._areaName(area),
-      status: motion && (profile === "room" || profile === "media") ? { source: "area_motion", ...(area ? { area } : {}), active_text: "Motion", inactive_text: "No motion", show_last_changed: true, last_changed_text: "Last motion" } : this._config.status,
+      status: presence && (profile === "room" || profile === "media") ? { source: "area_presence", ...(area ? { area } : {}) } : motion && (profile === "room" || profile === "media") ? { source: "area_motion", ...(area ? { area } : {}), active_text: "Motion", inactive_text: "No motion", show_last_changed: true, last_changed_text: "Last motion" } : door && profile === "house" ? { source: "area_doors", inactive_text: "All doors" } : this._config.status,
       metrics: metrics.length ? metrics : this._config.metrics,
     });
   }
@@ -545,8 +694,11 @@ export class AreaGlanceCardEditor extends LitElement {
     const updated = { ...metrics[index], ...change };
     if (change.preset && change.preset !== metrics[index].preset) {
       Object.assign(updated, presetMetric(change.preset));
-      if (["temperature", "humidity", "lights", "power", "co2"].includes(change.preset)) updated.entity = undefined;
-      else updated.source = "entity";
+      if (AUTOMATIC_METRIC_PRESETS.includes(change.preset)) updated.entity = undefined;
+      else {
+        updated.source = "entity";
+        if (change.preset === "people_home" && this.hass?.states["zone.home"]) updated.entity = "zone.home";
+      }
     }
     metrics[index] = updated;
     this._change({ metrics });
@@ -560,6 +712,7 @@ export class AreaGlanceCardEditor extends LitElement {
     const appearancePreset = this._config.appearance?.preset ?? "theme";
     const status = this._config.status;
     const statusSource = status?.source ?? (status?.entity ? "entity" : "area_motion");
+    const usesAreaStatus = Boolean(statusSignal(statusSource));
     const areaLabel = purpose === "energy" ? "Which energy area?" : purpose === "battery" ? "Where is the battery system?" : "Which area?";
     const currentAreaName = this._config.area ? this._areaName(this._config.area) : "this area";
     const headerAction = this._config.header_action?.action ?? "none";
@@ -577,14 +730,16 @@ export class AreaGlanceCardEditor extends LitElement {
       ${metrics.map((metric, index) => {
         const preset = metric.preset ?? "custom";
         const supportsArea = ["temperature", "humidity", "power", "co2"].includes(preset);
-        const usesArea = preset === "lights" || (supportsArea && (metric.source ?? (metric.entity ? "entity" : "area")) === "area");
+        const usesArea = preset === "lights" || AREA_SIGNAL_PRESETS.has(preset) || (supportsArea && (metric.source ?? (metric.entity ? "entity" : "area")) === "area");
         const source = metric.source ?? (metric.entity ? "entity" : "area");
-        const sourceLabel = usesArea ? (preset === "lights" ? "Area count" : "Area aggregate") : "Specific entity";
+        const sourceLabel = usesArea ? (preset === "lights" ? "Area count" : "Area aggregate") : preset === "people_home" ? "Home zone" : "Specific entity";
         return html`<details class="insight-editor">
         <summary><ha-icon .icon=${metric.icon ?? PRESETS[preset].icon}></ha-icon><span class="insight-name">${PRESETS[preset].label}</span><span class="source-pill">${sourceLabel}</span></summary>
         <div class="insight-fields"><label>What should this show?
           <select .value=${metric.preset ?? "custom"} @change=${(e: Event) => this._updateMetric(index, { preset: (e.target as HTMLSelectElement).value as MetricPreset })}>
-            ${Object.entries(PRESETS).map(([preset, defaults]) => html`<option value=${preset}>${defaults.label}</option>`)}
+            <optgroup label="Automatic area insights">${AUTOMATIC_METRIC_PRESETS.map((option) => html`<option value=${option}>${PRESETS[option].label}</option>`)}</optgroup>
+            <optgroup label="Home and chosen entities">${DEVICE_METRIC_PRESETS.map((option) => html`<option value=${option}>${PRESETS[option].label}</option>`)}</optgroup>
+            ${preset === "occupancy" ? html`<option value="occupancy">${PRESETS.occupancy.label}</option>` : nothing}
           </select>
         </label>
         <p class="slot-hint">${SLOT_HELPERS[preset]}</p>
@@ -594,7 +749,7 @@ export class AreaGlanceCardEditor extends LitElement {
             <option value="entity">A specific entity</option>
           </select>
         </label>` : nothing}
-        ${usesArea ? html`<ha-area-picker .hass=${this.hass} .value=${metric.area ?? this._config.area ?? ""} .label=${preset === "lights" ? "Area to count" : "Area to summarise"} @value-changed=${(e: Event) => this._updateMetric(index, { source: "area", area: this._pickerValue(e) })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${`${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>`}
+        ${usesArea ? html`<ha-area-picker .hass=${this.hass} .value=${metric.area ?? this._config.area ?? ""} .label=${preset === "lights" ? "Area to count" : "Area to summarise"} @value-changed=${(e: Event) => this._updateMetric(index, { source: "area", area: this._pickerValue(e) })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${preset === "device" || preset === "custom" ? "Device or entity" : `${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>`}
         <details class="more-options"><summary>More options</summary>
           <div class="two"><label>Label <input .value=${metric.label ?? ""} @input=${(e: Event) => this._updateMetric(index, { label: (e.target as HTMLInputElement).value })}></label><ha-icon-picker label="Icon" .value=${metric.icon ?? ""} .placeholder=${PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon: this._pickerValue(e) })}></ha-icon-picker></div>
           <div class="two"><label>Colour <input .value=${metric.color ?? ""} placeholder="var(--primary-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value })}></label><label>Unit override <input .value=${metric.unit ?? ""} @input=${(e: Event) => this._updateMetric(index, { unit: (e.target as HTMLInputElement).value })}></label></div>
@@ -603,9 +758,24 @@ export class AreaGlanceCardEditor extends LitElement {
       </details>`})}
       <button class="add" ?disabled=${metrics.length >= 5} @click=${this._addMetric}>Add insight</button>
       </section>
-      <details class="settings"><summary>Header</summary>
+      <details class="settings">
+        <summary>Header</summary>
         <label>Card layout<select .value=${this._config.layout ?? "header"} @change=${this._layoutChanged}><option value="header">Title beside insights (default)</option><option value="stacked">Title above insights</option><option value="metrics-only">Insights only</option></select></label>
-        ${this._config.layout !== "metrics-only" ? html`<label>Title <input .value=${this._config.title ?? ""} placeholder=${currentAreaName} @input=${(e: Event) => this._input(e, "title")}></label><label>When the header is tapped<select .value=${headerAction} @change=${this._headerActionChanged}><option value="none">Do nothing</option><option value="area-details">Show area details</option><option value="navigate">Navigate to a dashboard page</option></select></label>${headerAction === "navigate" ? html`<label>Dashboard path <input .value=${this._config.header_action?.navigation_path ?? ""} placeholder="/dashboard/room" @input=${this._headerNavigationChanged}></label>` : nothing}<label class="checkbox"><input type="checkbox" .checked=${Boolean(status)} @change=${this._statusEnabledChanged}> Show a status line</label>${status ? html`<label>Status comes from<select .value=${statusSource} @change=${this._statusSourceChanged}><option value="area_motion">Motion in this area</option><option value="entity">A specific entity</option></select></label>${statusSource === "area_motion" ? html`<ha-area-picker .hass=${this.hass} .value=${status.area ?? this._config.area ?? ""} .label=${"Motion area"} @value-changed=${(e: Event) => this._change({ status: { ...status, source: "area_motion", area: this._pickerValue(e) } })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${status.entity ?? ""} .label=${"Status entity"} allow-custom-entity @value-changed=${(e: Event) => this._change({ status: { ...status, source: "entity", entity: this._pickerValue(e) } })}></ha-entity-picker>`}<div class="two"><label>When active <input .value=${status.active_text ?? ""} placeholder="Motion" @input=${(e: Event) => this._statusInput(e, "active_text")}></label><label>When inactive <input .value=${status.inactive_text ?? ""} placeholder="No motion" @input=${(e: Event) => this._statusInput(e, "inactive_text")}></label></div><label class="checkbox"><input type="checkbox" .checked=${status.show_last_changed ?? false} @change=${(e: Event) => this._statusBoolean(e, "show_last_changed")}> Show when it last changed</label>${status.show_last_changed ? html`<label>History label <input .value=${status.last_changed_text ?? ""} placeholder="Last motion" @input=${(e: Event) => this._statusInput(e, "last_changed_text")}></label>` : nothing}` : nothing}` : nothing}
+        ${this._config.layout !== "metrics-only" ? html`
+          <label>Title <input .value=${this._config.title ?? ""} placeholder=${currentAreaName} @input=${(e: Event) => this._input(e, "title")}></label>
+          <label>When the header is tapped<select .value=${headerAction} @change=${this._headerActionChanged}><option value="none">Do nothing</option><option value="area-details">Show area details</option><option value="navigate">Navigate to a dashboard page</option></select></label>
+          ${headerAction === "navigate" ? html`<label>Dashboard path <input .value=${this._config.header_action?.navigation_path ?? ""} placeholder="/dashboard/room" @input=${this._headerNavigationChanged}></label>` : nothing}
+          <label class="checkbox"><input type="checkbox" .checked=${Boolean(status)} @change=${this._statusEnabledChanged}> Show a status line</label>
+          ${status ? html`
+            <label>Status comes from<select .value=${statusSource} @change=${this._statusSourceChanged}><option value="area_presence">Presence in this area</option><option value="area_motion">Motion in this area</option><option value="area_doors">Doors in this area</option><option value="area_windows">Windows in this area</option><option value="area_leaks">Water leaks in this area</option><option value="entity">A specific entity</option></select></label>
+            ${usesAreaStatus ? html`<ha-area-picker .hass=${this.hass} .value=${status.area ?? this._config.area ?? ""} .label=${statusSource === "area_doors" ? "Door area" : statusSource === "area_windows" ? "Window area" : statusSource === "area_leaks" ? "Area to check for leaks" : statusSource === "area_presence" ? "Presence area" : "Motion area"} @value-changed=${(e: Event) => this._change({ status: { ...status, source: statusSource, area: this._pickerValue(e) } })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${status.entity ?? ""} .label="Status entity" allow-custom-entity @value-changed=${(e: Event) => this._change({ status: { ...status, source: "entity", entity: this._pickerValue(e) } })}></ha-entity-picker>`}
+            ${statusSource === "area_doors" ? html`<p class="slot-hint">Closed doors show a green summary; open doors name the affected doors.</p>` : statusSource === "area_windows" ? html`<p class="slot-hint">Closed windows show a green summary; open windows need attention.</p>` : statusSource === "area_leaks" ? html`<p class="slot-hint">Dry is green; a detected leak is red.</p>` : statusSource === "area_presence" ? html`<p class="slot-hint">Presence means an occupancy or presence sensor is active. It is different from recent motion.</p>` : html`
+              <div class="two"><label>When active <input .value=${status.active_text ?? ""} placeholder="Motion" @input=${(e: Event) => this._statusInput(e, "active_text")}></label><label>When inactive <input .value=${status.inactive_text ?? ""} placeholder="No motion" @input=${(e: Event) => this._statusInput(e, "inactive_text")}></label></div>
+              <label class="checkbox"><input type="checkbox" .checked=${status.show_last_changed ?? false} @change=${(e: Event) => this._statusBoolean(e, "show_last_changed")}> Show when it last changed</label>
+              ${status.show_last_changed ? html`<label>History label <input .value=${status.last_changed_text ?? ""} placeholder="Last motion" @input=${(e: Event) => this._statusInput(e, "last_changed_text")}></label>` : nothing}
+            `}
+          ` : nothing}
+        ` : nothing}
       </details>
       <details class="settings"><summary>Card appearance</summary>
         <label>Size<select .value=${this._config.height ?? "slim"} @change=${this._heightChanged}><option value="slim">Slim (default)</option><option value="compact">Compact</option><option value="standard">Medium</option><option value="comfortable">Tall</option></select></label>
