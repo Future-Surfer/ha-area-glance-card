@@ -37,11 +37,12 @@ export interface HassLike {
 }
 
 export interface ActionConfig {
-  action?: "more-info" | "navigate" | "toggle" | "call-service" | "area-details" | "status-details" | "none";
+  action?: "more-info" | "navigate" | "toggle" | "call-service" | "area-details" | "metric-details" | "status-details" | "none";
   entity?: string;
   navigation_path?: string;
   service?: string;
   data?: Record<string, unknown>;
+  confirmation?: string;
 }
 
 export interface StatusConfig extends ActionConfig {
@@ -67,6 +68,9 @@ export interface MetricConfig extends ActionConfig {
   /** Optional entity whose state selects a custom-combination colour rule. */
   color_entity?: string;
   color_rules?: { state: string; color: string }[];
+  /** Ordered numeric colour rules for standard measurement insights. */
+  thresholds?: { above?: number; below?: number; color: string }[];
+  aggregation?: "median" | "highest" | "lowest" | "sum";
   area?: string;
   domain?: string;
   label?: string;
@@ -74,9 +78,15 @@ export interface MetricConfig extends ActionConfig {
   color?: string;
   decimals?: number;
   unit?: string;
+  show_unit?: boolean;
+  show_icon?: boolean;
+  show_label?: boolean;
+  label_mode?: "preset" | "entity" | "custom";
   format?: "auto" | "number" | "temperature" | "percent" | "power";
   hide_unavailable?: boolean;
   hidden?: boolean;
+  hold_action?: ActionConfig;
+  double_tap_action?: ActionConfig;
 }
 
 export interface AreaGlanceConfig extends ActionConfig {

@@ -87,6 +87,18 @@ const isAreaMeasurement = (preset: MetricPreset, entityId: string, state?: Entit
   return false;
 };
 
+const defaultAggregation = (preset: MetricPreset): NonNullable<MetricConfig["aggregation"]> =>
+  preset === "power" ? "sum" : ["co2", "pm25", "voc", "aqi"].includes(preset) ? "highest" : "median";
+
+const aggregateValues = (values: number[], aggregation: NonNullable<MetricConfig["aggregation"]>): number => {
+  const sorted = [...values].sort((left, right) => left - right);
+  if (aggregation === "sum") return sorted.reduce((total, value) => total + value, 0);
+  if (aggregation === "highest") return sorted.at(-1)!;
+  if (aggregation === "lowest") return sorted[0]!;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
+
 const friendlyState = (state: string) => state.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 
 const friendlyDeviceState = (domain: string | undefined, state: string): string => {
@@ -144,6 +156,8 @@ interface MetricDisplay {
   color?: string;
   value: string;
   label: string;
+  showIcon?: boolean;
+  showLabel?: boolean;
   entities?: string[];
   aggregate?: boolean;
 }
@@ -247,29 +261,39 @@ export class AreaGlanceCard extends LitElement {
     return { icon, color: metric.color ?? (summary.active.length ? "var(--warning-color, #e0af00)" : "var(--success-color, #2eaa45)"), value: summary.active.length ? `${summary.active.length} open` : "Closed", label: metric.label ?? noun, entities: entityIds, aggregate: true };
   }
 
+  private _thresholdColor(metric: MetricConfig, value: number | undefined, fallback: string): string {
+    if (value === undefined) return fallback;
+    const rule = metric.thresholds?.find((candidate) => candidate.color.trim()
+      && (candidate.above === undefined || value >= candidate.above)
+      && (candidate.below === undefined || value <= candidate.below));
+    return rule?.color.trim() || fallback;
+  }
+
   private _areaMetric(metric: MetricConfig, preset: MetricPreset, label: string, icon: string): MetricDisplay {
     const area = metric.area ?? this._config?.area;
     const color = metric.color ?? PRESETS[preset].color;
+    const aggregation = metric.aggregation ?? defaultAggregation(preset);
     if (!area && this._config?.profile !== "house") return { icon, color, value: "–", label };
     if (AREA_SIGNAL_PRESETS.has(preset)) return this._areaSignalMetric(metric, preset as AreaSignal, label, icon);
     if (preset === "lights") {
       const lights = this._areaEntities(area, metric.domain ?? "light");
       const on = lights.filter((id) => this.hass?.states[id]?.state === "on").length;
-      return { icon, color, value: `${on}/${lights.length}`, label, entities: lights, aggregate: true };
+      return { icon, color: this._thresholdColor(metric, on, color), value: `${on}/${lights.length}`, label, entities: lights, aggregate: true };
     }
     const values = this._areaEntities(area).map((entityId) => ({ entityId, state: this.hass?.states[entityId], value: asNumber(this.hass?.states[entityId]?.state ?? "") }))
       .filter((item) => isAreaMeasurement(preset, item.entityId, item.state) && item.value !== undefined && item.state && !UNAVAILABLE.has(item.state.state)) as { entityId: string; state: EntityState; value: number }[];
     if (!values.length) return { icon, color, value: "–", label };
 
     if (preset === "power") {
-      const watts = values.reduce((total, item) => {
+      const watts = aggregateValues(values.map((item) => {
         const unit = String(item.state.attributes.unit_of_measurement ?? "W");
-        return total + item.value * (unit === "kW" ? 1000 : unit === "MW" ? 1000000 : 1);
-      }, 0);
+        return item.value * (unit === "kW" ? 1000 : unit === "MW" ? 1000000 : 1);
+      }), aggregation);
       const useKilowatts = metric.unit === "kW" || (!metric.unit && Math.abs(watts) >= 1000);
       const displayed = useKilowatts ? watts / 1000 : watts;
       const decimals = metric.decimals ?? (useKilowatts ? 1 : 0);
-      return { icon, color, value: `${displayed.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${metric.unit ?? (useKilowatts ? "kW" : "W")}`, label, entities: values.map((item) => item.entityId), aggregate: true };
+      const unit = metric.show_unit === false ? "" : metric.unit ?? (useKilowatts ? "kW" : "W");
+      return { icon, color: this._thresholdColor(metric, displayed, color), value: `${displayed.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit}`, label, entities: values.map((item) => item.entityId), aggregate: true };
     }
 
     const compatibleValues = preset === "voc"
@@ -279,14 +303,12 @@ export class AreaGlanceCard extends LitElement {
         return groups;
       }, {})).sort((left, right) => right.length - left.length)[0] ?? values
       : values;
-    const sorted = compatibleValues.map((item) => item.value).sort((left, right) => left - right);
-    const middle = Math.floor(sorted.length / 2);
-    const number = ["co2", "pm25", "voc", "aqi"].includes(preset) ? sorted.at(-1)! : sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+    const number = aggregateValues(compatibleValues.map((item) => item.value), aggregation);
     const format = metric.format ?? PRESETS[preset].format;
     const decimals = metric.decimals ?? 0;
     const inferredUnit = String(compatibleValues[0].state.attributes.unit_of_measurement ?? "");
-    const unit = metric.unit ?? (format === "temperature" ? "°" : format === "percent" ? "%" : inferredUnit);
-    return { icon, color, value: `${number.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit}`, label, entities: compatibleValues.map((item) => item.entityId), aggregate: true };
+    const unit = metric.show_unit === false ? "" : metric.unit ?? (format === "temperature" ? "°" : format === "percent" ? "%" : inferredUnit);
+    return { icon, color: this._thresholdColor(metric, number, color), value: `${number.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit}`, label, entities: compatibleValues.map((item) => item.entityId), aggregate: true };
   }
 
   private _entityDisplayValue(entityId?: string): string | undefined {
@@ -323,9 +345,12 @@ export class AreaGlanceCard extends LitElement {
       : entityDomain === "weather" ? { icon: "mdi:weather-partly-cloudy", label: "Weather" }
       : entityDomain === "climate" ? { icon: "mdi:thermostat", label: "Climate" }
       : undefined;
-    const label = preset === "device" && (!metric.label || metric.label === defaults.label)
+    const defaultLabel = preset === "device" && (!metric.label || metric.label === defaults.label)
       ? devicePresentation?.label ?? defaults.label
       : metric.label ?? defaults.label;
+    const label = metric.label_mode === "entity" && typeof state?.attributes.friendly_name === "string"
+      ? state.attributes.friendly_name
+      : defaultLabel;
     const configuredIcon = preset === "device" && (!metric.icon || metric.icon === defaults.icon)
       ? devicePresentation?.icon ?? String(state?.attributes.icon ?? defaults.icon)
       : metric.icon ?? defaults.icon;
@@ -345,7 +370,7 @@ export class AreaGlanceCard extends LitElement {
     if (number !== undefined) {
       const rendered = number.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals });
       const inferredUnit = typeof state.attributes.unit_of_measurement === "string" ? state.attributes.unit_of_measurement : "";
-      const unit = metric.unit ?? (format === "temperature" ? "°" : format === "percent" ? "%" : inferredUnit);
+      const unit = metric.show_unit === false ? "" : metric.unit ?? (format === "temperature" ? "°" : format === "percent" ? "%" : inferredUnit);
       value = `${rendered}${unit}`;
     } else if ((preset === "occupancy" || preset === "people_home") && ["on", "off"].includes(state.state)) {
       value = state.state === "on" ? "Home" : "Away";
@@ -356,6 +381,7 @@ export class AreaGlanceCard extends LitElement {
     if (!metric.color && preset === "battery" && number !== undefined) {
       color = number <= 20 ? "var(--error-color, #db4437)" : number <= 50 ? "var(--warning-color, #e0af00)" : "var(--info-color, #3f8cff)";
     }
+    if (preset !== "custom") color = this._thresholdColor(metric, number, color);
     if (preset === "custom") color = this._customColor(metric, state, color);
     return { icon, color, value, label: customLabel };
   }
@@ -423,6 +449,7 @@ export class AreaGlanceCard extends LitElement {
     const kind = config?.action ?? "more-info";
     const entity = config?.entity ?? fallbackEntity;
     if (kind === "none") return;
+    if (config?.confirmation && !window.confirm(config.confirmation)) return;
     if (kind === "area-details") {
       this._openAreaDetails();
       return;
@@ -480,19 +507,27 @@ export class AreaGlanceCard extends LitElement {
     };
   }
 
-  private _metricClicked(metric: MetricConfig, display: MetricDisplay, event: Event) {
-    event.stopPropagation();
-    const preset = metric.preset ?? "custom";
-    if (metric.action && metric.action !== "more-info") {
-      this._runAction(metric, metric.entity);
-      return;
-    }
-    if (this._metricSource(metric, preset) === "area") {
+  private _metricAction(metric: MetricConfig, display: MetricDisplay, action?: ActionConfig, fallback = false) {
+    if (action?.action === "metric-details") {
       this._openMetricDetails(metric, display);
       return;
     }
-    this._runAction(metric, metric.entity);
+    if (action?.action && (action.action !== "more-info" || Boolean(action.entity ?? metric.entity))) {
+      this._runAction(action, metric.entity);
+      return;
+    }
+    if (!fallback) return;
+    const preset = metric.preset ?? "custom";
+    if (this._metricSource(metric, preset) === "area") this._openMetricDetails(metric, display);
+    else this._runAction(metric, metric.entity);
   }
+
+  private _metricClicked(metric: MetricConfig, display: MetricDisplay, event: Event) {
+    event.stopPropagation();
+    this._metricAction(metric, display, metric, true);
+  }
+  private _metricHeld(metric: MetricConfig, display: MetricDisplay, event: Event) { event.preventDefault(); event.stopPropagation(); this._metricAction(metric, display, metric.hold_action); }
+  private _metricDoubleTapped(metric: MetricConfig, display: MetricDisplay, event: Event) { event.preventDefault(); event.stopPropagation(); this._metricAction(metric, display, metric.double_tap_action); }
 
   private _headerClicked() { this._runAction(this._config?.header_action ?? this._config); }
   private _statusClicked(event: Event) {
@@ -535,10 +570,10 @@ export class AreaGlanceCard extends LitElement {
             </div>` : nothing}
           <div class="metrics" style=${`--metric-count:${Math.max(metrics.length, 1)}`}>
             ${metrics.map(({ metric, display }) => html`
-              <button class="metric" aria-label=${`${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)}>
-                <ha-icon .icon=${display.icon} style=${display.color ? `color:${display.color}` : ""}></ha-icon>
+              <button class="metric" aria-label=${`${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)} @contextmenu=${(event: Event) => this._metricHeld(metric, display, event)} @dblclick=${(event: Event) => this._metricDoubleTapped(metric, display, event)}>
+                ${metric.show_icon !== false ? html`<ha-icon .icon=${display.icon} style=${display.color ? `color:${display.color}` : ""}></ha-icon>` : nothing}
                 <span class="value">${display.value}</span>
-                <span class="label">${display.label}</span>
+                ${metric.show_label !== false ? html`<span class="label">${display.label}</span>` : nothing}
               </button>
             `)}
           </div>
@@ -601,6 +636,7 @@ export class AreaGlanceCardEditor extends LitElement {
   public hass?: HassLike;
   private _config: AreaGlanceConfig = { title: "Area", metrics: DEFAULT_METRICS };
   private _suggestionsNeedUpdate = false;
+  private _draggedMetricIndex?: number;
 
   static get properties() { return { hass: { attribute: false }, _config: { state: true }, _suggestionsNeedUpdate: { state: true } }; }
   public setConfig(config: AreaGlanceConfig) {
@@ -688,6 +724,19 @@ export class AreaGlanceCardEditor extends LitElement {
       const deviceArea = entity?.device_id ? this.hass?.devices?.[entity.device_id]?.area_id : undefined;
       return entity?.area_id === area || deviceArea === area;
     });
+  }
+  private _contributorHint(metric: MetricConfig, preset: MetricPreset, usesArea: boolean): string | undefined {
+    if (!usesArea) return undefined;
+    const area = metric.area ?? this._config.area;
+    if (!area) return "Choose an area to see compatible contributors.";
+    const entities = this._entitiesInArea(area);
+    const count = preset === "lights"
+      ? entities.filter((entityId) => entityId.startsWith("light.")).length
+      : AREA_SIGNAL_PRESETS.has(preset)
+        ? entities.filter((entityId) => isSignalEntity(preset as AreaSignal, entityId, this.hass?.states[entityId])).length
+        : entities.filter((entityId) => isAreaMeasurement(preset, entityId, this.hass?.states[entityId])).length;
+    const noun = preset === "lights" ? "light" : "compatible sensor";
+    return `Using ${count} ${noun}${count === 1 ? "" : "s"} from ${this._areaName(area)}.`;
   }
   private _inferredProfile(area: string, requested: NonNullable<AreaGlanceConfig["profile"]>): Exclude<NonNullable<AreaGlanceConfig["profile"]>, "auto"> {
     if (requested !== "auto") return requested;
@@ -793,6 +842,8 @@ export class AreaGlanceCardEditor extends LitElement {
       delete updated.icon_entity;
       delete updated.color_entity;
       delete updated.color_rules;
+      delete updated.thresholds;
+      delete updated.aggregation;
       Object.assign(updated, presetMetric(change.preset));
       if (AUTOMATIC_METRIC_PRESETS.includes(change.preset)) updated.entity = undefined;
       else {
@@ -819,6 +870,98 @@ export class AreaGlanceCardEditor extends LitElement {
     const metrics = [...(this._config.metrics ?? [])];
     metrics[index] = { ...metrics[index], color_rules: (metrics[index].color_rules ?? []).filter((_, currentIndex) => currentIndex !== ruleIndex) };
     this._change({ metrics });
+  }
+  private _moveMetric(index: number, direction: -1 | 1) {
+    const metrics = [...(this._config.metrics ?? [])];
+    const destination = index + direction;
+    if (destination < 0 || destination >= metrics.length) return;
+    [metrics[index], metrics[destination]] = [metrics[destination], metrics[index]];
+    this._change({ metrics });
+  }
+  private _duplicateMetric(index: number) {
+    const metrics = [...(this._config.metrics ?? [])];
+    if (metrics.length >= 5) return;
+    metrics.splice(index + 1, 0, structuredClone(metrics[index]));
+    this._change({ metrics });
+  }
+  private _dragStart(index: number, event: DragEvent) {
+    this._draggedMetricIndex = index;
+    event.dataTransfer?.setData("text/plain", String(index));
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+  }
+  private _dropMetric(index: number, event: DragEvent) {
+    event.preventDefault();
+    const from = this._draggedMetricIndex ?? Number(event.dataTransfer?.getData("text/plain"));
+    this._draggedMetricIndex = undefined;
+    if (!Number.isInteger(from) || from === index || from < 0) return;
+    const metrics = [...(this._config.metrics ?? [])];
+    const [moved] = metrics.splice(from, 1);
+    metrics.splice(index, 0, moved);
+    this._change({ metrics });
+  }
+  private _metricAction(metric: MetricConfig, trigger: "tap" | "hold" | "double"): ActionConfig | undefined {
+    return trigger === "tap" ? metric : trigger === "hold" ? metric.hold_action : metric.double_tap_action;
+  }
+  private _metricActionChanged(index: number, trigger: "tap" | "hold" | "double", event: Event) {
+    const action = (event.target as HTMLSelectElement).value as NonNullable<ActionConfig["action"]> | "auto";
+    if (trigger === "tap") {
+      this._updateMetric(index, { action: action === "auto" ? undefined : action });
+      return;
+    }
+    this._updateMetric(index, { [trigger === "hold" ? "hold_action" : "double_tap_action"]: action === "auto" ? undefined : { action } });
+  }
+  private _metricActionInput(index: number, trigger: "tap" | "hold" | "double", key: keyof ActionConfig, event: Event) {
+    const value = (event.target as HTMLInputElement).value;
+    if (trigger === "tap") {
+      this._updateMetric(index, { [key]: value || undefined });
+      return;
+    }
+    const metric = (this._config.metrics ?? [])[index];
+    const actionKey = trigger === "hold" ? "hold_action" : "double_tap_action";
+    this._updateMetric(index, { [actionKey]: { ...metric[actionKey], [key]: value || undefined } });
+  }
+  private _toggleMetricConfirmation(index: number, trigger: "tap" | "hold" | "double", event: Event) {
+    const checked = (event.target as HTMLInputElement).checked;
+    const message = checked ? "Are you sure?" : undefined;
+    if (trigger === "tap") { this._updateMetric(index, { confirmation: message }); return; }
+    const metric = (this._config.metrics ?? [])[index];
+    const actionKey = trigger === "hold" ? "hold_action" : "double_tap_action";
+    this._updateMetric(index, { [actionKey]: { ...metric[actionKey], confirmation: message } });
+  }
+  private _metricActionFields(index: number, metric: MetricConfig, trigger: "tap" | "hold" | "double", usesArea: boolean) {
+    const config = this._metricAction(metric, trigger);
+    const action = config?.action ?? "auto";
+    const title = trigger === "tap" ? "When tapped" : trigger === "hold" ? "When held" : "When double-tapped";
+    const canToggle = Boolean(metric.entity) && !usesArea;
+    return html`<label>${title}<select .value=${action} @change=${(event: Event) => this._metricActionChanged(index, trigger, event)}>
+      <option value="auto">${trigger === "tap" ? "Automatic" : "Not set"}</option>
+      ${usesArea ? html`<option value="metric-details">Show included entities</option><option value="area-details">Show area details</option>` : html`<option value="more-info">Show entity details</option>`}
+      <option value="navigate">Navigate to a dashboard page</option>${canToggle ? html`<option value="toggle">Toggle this entity</option>` : nothing}<option value="call-service">Call a service</option><option value="none">Do nothing</option>
+    </select></label>
+    ${action === "navigate" ? html`<label>Dashboard path <input .value=${config?.navigation_path ?? ""} placeholder="/dashboard/room" @input=${(event: Event) => this._metricActionInput(index, trigger, "navigation_path", event)}></label>` : nothing}
+    ${action === "call-service" ? html`<label>Service <input .value=${config?.service ?? ""} placeholder="light.turn_on" @input=${(event: Event) => this._metricActionInput(index, trigger, "service", event)}></label>` : nothing}
+    ${action === "toggle" || action === "call-service" ? html`<label class="checkbox"><input type="checkbox" .checked=${Boolean(config?.confirmation)} @change=${(event: Event) => this._toggleMetricConfirmation(index, trigger, event)}> Ask for confirmation</label>` : nothing}`;
+  }
+  private _updateThreshold(index: number, thresholdIndex: number, change: Partial<NonNullable<MetricConfig["thresholds"]>[number]>) {
+    const metrics = [...(this._config.metrics ?? [])];
+    const thresholds = [...(metrics[index].thresholds ?? [])];
+    thresholds[thresholdIndex] = { ...thresholds[thresholdIndex], ...change };
+    metrics[index] = { ...metrics[index], thresholds };
+    this._change({ metrics });
+  }
+  private _addThreshold(index: number) {
+    const metrics = [...(this._config.metrics ?? [])];
+    metrics[index] = { ...metrics[index], thresholds: [...(metrics[index].thresholds ?? []), { above: undefined, color: "" }] };
+    this._change({ metrics });
+  }
+  private _removeThreshold(index: number, thresholdIndex: number) {
+    const metrics = [...(this._config.metrics ?? [])];
+    metrics[index] = { ...metrics[index], thresholds: (metrics[index].thresholds ?? []).filter((_, currentIndex) => currentIndex !== thresholdIndex) };
+    this._change({ metrics });
+  }
+  private _aggregationChanged(index: number, event: Event) {
+    const value = (event.target as HTMLSelectElement).value;
+    this._updateMetric(index, { aggregation: value === "auto" ? undefined : value as NonNullable<MetricConfig["aggregation"]> });
   }
   private _removeMetric(index: number) { this._change({ metrics: (this._config.metrics ?? []).filter((_, metricIndex) => metricIndex !== index) }); }
   private _addMetric() { this._change({ metrics: [...(this._config.metrics ?? []), presetMetric("temperature")] }); }
@@ -851,8 +994,10 @@ export class AreaGlanceCardEditor extends LitElement {
         const usesArea = preset === "lights" || AREA_SIGNAL_PRESETS.has(preset) || (supportsArea && (metric.source ?? (metric.entity ? "entity" : "area")) === "area");
         const source = metric.source ?? (metric.entity ? "entity" : "area");
         const sourceLabel = usesArea ? (preset === "lights" ? "Area count" : "Area aggregate") : preset === "people_home" ? "Home zone" : "Specific entity";
-        return html`<details class="insight-editor">
-        <summary><ha-icon .icon=${metric.icon ?? PRESETS[preset].icon}></ha-icon><span class="insight-name">${PRESETS[preset].label}</span><span class="source-pill">${sourceLabel}</span></summary>
+        const contributorHint = this._contributorHint(metric, preset, usesArea);
+        const supportsThresholds = ["temperature", "humidity", "lights", "power", "battery", "co2", "pm25", "voc", "aqi"].includes(preset);
+        return html`<details class="insight-editor" draggable="true" @dragstart=${(event: DragEvent) => this._dragStart(index, event)} @dragover=${(event: DragEvent) => event.preventDefault()} @drop=${(event: DragEvent) => this._dropMetric(index, event)}>
+        <summary><span class="drag-handle" title="Drag to reorder">⠿</span><ha-icon .icon=${metric.icon ?? PRESETS[preset].icon}></ha-icon><span class="insight-name">${PRESETS[preset].label}</span><span class="source-pill">${sourceLabel}</span></summary>
         <div class="insight-fields"><label>What should this show?
           <select .value=${metric.preset ?? "custom"} @change=${(e: Event) => this._updateMetric(index, { preset: (e.target as HTMLSelectElement).value as MetricPreset })}>
             <optgroup label="Automatic area insights">${AUTOMATIC_METRIC_PRESETS.map((option) => html`<option value=${option}>${PRESETS[option].label}</option>`)}</optgroup>
@@ -867,7 +1012,7 @@ export class AreaGlanceCardEditor extends LitElement {
             <option value="entity">A specific entity</option>
           </select>
         </label>` : nothing}
-        ${usesArea ? html`<ha-area-picker .hass=${this.hass} .value=${metric.area ?? this._config.area ?? ""} .label=${preset === "lights" ? "Area to count" : "Area to summarise"} @value-changed=${(e: Event) => this._updateMetric(index, { source: "area", area: this._pickerValue(e) })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${preset === "custom" ? "Main text entity" : preset === "device" ? "Device or entity" : `${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>`}
+        ${usesArea ? html`<ha-area-picker .hass=${this.hass} .value=${metric.area ?? this._config.area ?? ""} .label=${preset === "lights" ? "Area to count" : "Area to summarise"} @value-changed=${(e: Event) => this._updateMetric(index, { source: "area", area: this._pickerValue(e) })}></ha-area-picker>${contributorHint ? html`<p class="contributor-hint">${contributorHint}</p>` : nothing}` : html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${preset === "custom" ? "Main text entity" : preset === "device" ? "Device or entity" : `${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>`}
         ${preset === "custom" ? html`
           <p class="slot-hint">Use one entity for the main state and another for the smaller supporting value beneath it.</p>
           <ha-entity-picker .hass=${this.hass} .value=${metric.secondary_entity ?? ""} label="Supporting value entity (optional)" allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { secondary_entity: this._pickerValue(e) || undefined })}></ha-entity-picker>
@@ -878,11 +1023,17 @@ export class AreaGlanceCardEditor extends LitElement {
             <button class="add-rule" @click=${() => this._addColorRule(index)}>Add colour rule</button>
           </div>
         ` : nothing}
-        <details class="more-options"><summary>More options</summary>
-          <div class="two"><label>${preset === "custom" ? "Supporting text fallback" : "Label"} <input .value=${preset === "custom" ? metric.secondary_text ?? "" : metric.label ?? ""} @input=${(e: Event) => this._updateMetric(index, preset === "custom" ? { secondary_text: (e.target as HTMLInputElement).value || undefined } : { label: (e.target as HTMLInputElement).value })}></label><ha-icon-picker label="Icon" .value=${metric.icon ?? ""} .placeholder=${PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon: this._pickerValue(e) })}></ha-icon-picker></div>
+        <details class="more-options"><summary>Fine tuning (optional)</summary>
+          ${preset !== "custom" ? html`<label>Label source<select .value=${metric.label_mode ?? (metric.label && metric.label !== PRESETS[preset].label ? "custom" : "preset")} @change=${(e: Event) => { const labelMode = (e.target as HTMLSelectElement).value as MetricConfig["label_mode"]; this._updateMetric(index, { label_mode: labelMode, ...(labelMode === "preset" ? { label: undefined } : {}) }); }}><option value="preset">Preset label</option>${!usesArea ? html`<option value="entity">Entity name</option>` : nothing}<option value="custom">Custom label</option></select></label>` : nothing}
+          <div class="two"><label>${preset === "custom" ? "Supporting text fallback" : "Custom label"} <input .value=${preset === "custom" ? metric.secondary_text ?? "" : metric.label ?? ""} placeholder=${PRESETS[preset].label} @input=${(e: Event) => this._updateMetric(index, preset === "custom" ? { secondary_text: (e.target as HTMLInputElement).value || undefined } : { label_mode: "custom", label: (e.target as HTMLInputElement).value || undefined })}></label><ha-icon-picker label="Icon" .value=${metric.icon ?? ""} .placeholder=${PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon: this._pickerValue(e) })}></ha-icon-picker></div>
           <div class="two"><label>${preset === "custom" ? "Fallback colour" : "Colour"} <input .value=${metric.color ?? ""} placeholder="var(--primary-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value || undefined })}></label><label>Unit override <input .value=${metric.unit ?? ""} @input=${(e: Event) => this._updateMetric(index, { unit: (e.target as HTMLInputElement).value || undefined })}></label></div>
+          <div class="three"><label>Decimal places <input type="number" min="0" max="4" .value=${metric.decimals?.toString() ?? ""} placeholder="Auto" @input=${(e: Event) => { const value = (e.target as HTMLInputElement).value; this._updateMetric(index, { decimals: value === "" ? undefined : Math.max(0, Math.min(4, Number(value))) }); }}></label><label class="checkbox"><input type="checkbox" .checked=${metric.show_unit !== false} @change=${(e: Event) => this._updateMetric(index, { show_unit: (e.target as HTMLInputElement).checked })}> Show unit</label><label class="checkbox"><input type="checkbox" .checked=${metric.show_icon !== false} @change=${(e: Event) => this._updateMetric(index, { show_icon: (e.target as HTMLInputElement).checked })}> Show icon</label></div>
+          <label class="checkbox"><input type="checkbox" .checked=${metric.show_label !== false} @change=${(e: Event) => this._updateMetric(index, { show_label: (e.target as HTMLInputElement).checked })}> Show label</label>
+          ${usesArea && supportsArea ? html`<label>Area aggregation<select .value=${metric.aggregation ?? "auto"} @change=${(e: Event) => this._aggregationChanged(index, e)}><option value="auto">Smart default (${defaultAggregation(preset)})</option><option value="median">Median</option><option value="highest">Highest</option><option value="lowest">Lowest</option>${preset === "power" ? html`<option value="sum">Sum</option>` : nothing}</select></label>` : nothing}
+          ${supportsThresholds && preset !== "custom" ? html`<details class="thresholds"><summary>Colour thresholds</summary><p class="slot-hint">First matching rule wins. Thresholds use the displayed value and unit.</p>${(metric.thresholds ?? []).map((threshold, thresholdIndex) => html`<div class="threshold"><label>At least <input type="number" .value=${threshold.above?.toString() ?? ""} placeholder="Optional" @input=${(e: Event) => { const value = (e.target as HTMLInputElement).value; this._updateThreshold(index, thresholdIndex, { above: value === "" ? undefined : Number(value) }); }}></label><label>At most <input type="number" .value=${threshold.below?.toString() ?? ""} placeholder="Optional" @input=${(e: Event) => { const value = (e.target as HTMLInputElement).value; this._updateThreshold(index, thresholdIndex, { below: value === "" ? undefined : Number(value) }); }}></label><label>Colour <input .value=${threshold.color} placeholder="var(--warning-color)" @input=${(e: Event) => this._updateThreshold(index, thresholdIndex, { color: (e.target as HTMLInputElement).value })}></label><button class="remove-rule" @click=${() => this._removeThreshold(index, thresholdIndex)}>Remove</button></div>`)}<button class="add-rule" @click=${() => this._addThreshold(index)}>Add threshold</button></details>` : nothing}
+          <details class="metric-actions"><summary>Actions (optional)</summary>${this._metricActionFields(index, metric, "tap", usesArea)}<details class="secondary-actions"><summary>Hold and double-tap</summary>${this._metricActionFields(index, metric, "hold", usesArea)}${this._metricActionFields(index, metric, "double", usesArea)}</details></details>
         </details>
-        <div class="insight-actions"><label class="checkbox"><input type="checkbox" .checked=${metric.hidden ?? false} @change=${this._metricBoolean(index, "hidden")}> Hide</label><button class="remove" @click=${() => this._removeMetric(index)}>Remove</button></div></div>
+        <div class="insight-actions"><div class="reorder"><button ?disabled=${index === 0} aria-label="Move insight left" @click=${() => this._moveMetric(index, -1)}>←</button><button ?disabled=${index === metrics.length - 1} aria-label="Move insight right" @click=${() => this._moveMetric(index, 1)}>→</button><button ?disabled=${metrics.length >= 5} @click=${() => this._duplicateMetric(index)}>Duplicate</button></div><label class="checkbox"><input type="checkbox" .checked=${metric.hidden ?? false} @change=${this._metricBoolean(index, "hidden")}> Hide</label><button class="remove" @click=${() => this._removeMetric(index)}>Remove</button></div></div>
       </details>`})}
       <button class="add" ?disabled=${metrics.length >= 5} @click=${this._addMetric}>Add insight</button>
       </section>
@@ -916,7 +1067,7 @@ export class AreaGlanceCardEditor extends LitElement {
     </div>`;
   }
   static styles = css`
-    :host { display:block; } .editor { padding:12px; } h3 { margin:0; } .hint, .slot-hint { color:var(--secondary-text-color); margin:4px 0 12px; } .slot-hint { font-size:.88rem; } label { display:block; font-weight:500; margin:12px 0; } ha-entity-picker, ha-area-picker { display:block; margin:12px 0; } input, select { box-sizing:border-box; width:100%; padding:8px; margin-top:4px; font:inherit; color:inherit; background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:6px; } button { cursor:pointer; font:inherit; } .setup, .insights { margin-top:18px; } .section-label { display:block; font-weight:600; margin-bottom:8px; } .purpose-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; } .purpose { text-align:left; min-height:62px; padding:10px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; } .purpose.selected { border:2px solid var(--primary-color); background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .purpose strong, .purpose small { display:block; } .purpose small { color:var(--secondary-text-color); font-size:.78rem; margin-top:3px; } .applied { color:var(--secondary-text-color); font-size:.9rem; margin:8px 0; } .suggestion-update { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:10px; margin-top:8px; border-radius:8px; background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .suggestion-update span { font-size:.88rem; } .primary, .add { padding:8px 12px; color:white; background:var(--primary-color); border:0; border-radius:6px; white-space:nowrap; } .advanced-setup, .settings, .insight-editor { border:1px solid var(--divider-color); border-radius:8px; padding:10px; margin-top:12px; } summary { cursor:pointer; font-weight:600; } .advanced-setup summary, .settings summary, .more-options summary { color:var(--secondary-text-color); } .insight-editor { padding:0; overflow:hidden; } .insight-editor > summary { display:flex; align-items:center; gap:8px; padding:12px; list-style:none; } .insight-editor > summary::-webkit-details-marker { display:none; } .insight-editor > summary::after { content:"›"; margin-left:auto; color:var(--secondary-text-color); font-size:1.4rem; } .insight-editor[open] > summary::after { transform:rotate(90deg); } .insight-editor ha-icon { width:22px; height:22px; color:var(--primary-color); } .insight-name { min-width:0; flex:1; } .source-pill { padding:3px 6px; border-radius:999px; color:var(--secondary-text-color); background:color-mix(in srgb, var(--secondary-text-color) 12%, transparent); font-size:.72rem; white-space:nowrap; } .insight-fields { padding:0 12px 12px; border-top:1px solid var(--divider-color); } .more-options { margin-top:12px; } .two { display:grid; grid-template-columns:1fr 1fr; gap:8px; } .checkbox { font-weight:400; } .checkbox input { width:auto; margin:0 6px 0 0; vertical-align:middle; } .insight-actions { display:flex; align-items:center; justify-content:space-between; } .remove { padding:6px 0; color:var(--error-color); background:transparent; border:0; } .add { margin-top:12px; } @media (max-width:400px) { .purpose-grid, .two { grid-template-columns:1fr; } .suggestion-update { align-items:flex-start; flex-direction:column; } }
+    :host { display:block; } .editor { padding:12px; } h3 { margin:0; } .hint, .slot-hint, .contributor-hint { color:var(--secondary-text-color); margin:4px 0 12px; } .slot-hint, .contributor-hint { font-size:.88rem; } .contributor-hint { padding:7px 9px; border-radius:6px; background:color-mix(in srgb, var(--primary-color) 7%, var(--card-background-color)); } label { display:block; font-weight:500; margin:12px 0; } ha-entity-picker, ha-area-picker { display:block; margin:12px 0; } input, select { box-sizing:border-box; width:100%; padding:8px; margin-top:4px; font:inherit; color:inherit; background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:6px; } button { cursor:pointer; font:inherit; } .setup, .insights { margin-top:18px; } .section-label { display:block; font-weight:600; margin-bottom:8px; } .purpose-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; } .purpose { text-align:left; min-height:62px; padding:10px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; } .purpose.selected { border:2px solid var(--primary-color); background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .purpose strong, .purpose small { display:block; } .purpose small { color:var(--secondary-text-color); font-size:.78rem; margin-top:3px; } .applied { color:var(--secondary-text-color); font-size:.9rem; margin:8px 0; } .suggestion-update { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:10px; margin-top:8px; border-radius:8px; background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .suggestion-update span { font-size:.88rem; } .primary, .add { padding:8px 12px; color:white; background:var(--primary-color); border:0; border-radius:6px; white-space:nowrap; } .advanced-setup, .settings, .insight-editor { border:1px solid var(--divider-color); border-radius:8px; padding:10px; margin-top:12px; } summary { cursor:pointer; font-weight:600; } .advanced-setup summary, .settings summary, .more-options summary, .thresholds summary, .metric-actions summary, .secondary-actions summary { color:var(--secondary-text-color); } .insight-editor { padding:0; overflow:hidden; } .insight-editor > summary { display:flex; align-items:center; gap:8px; padding:12px; list-style:none; } .insight-editor > summary::-webkit-details-marker { display:none; } .insight-editor > summary::after { content:"›"; margin-left:auto; color:var(--secondary-text-color); font-size:1.4rem; } .insight-editor[open] > summary::after { transform:rotate(90deg); } .insight-editor ha-icon { width:22px; height:22px; color:var(--primary-color); } .drag-handle { color:var(--secondary-text-color); cursor:grab; font-size:1.15rem; letter-spacing:-2px; } .insight-name { min-width:0; flex:1; } .source-pill { padding:3px 6px; border-radius:999px; color:var(--secondary-text-color); background:color-mix(in srgb, var(--secondary-text-color) 12%, transparent); font-size:.72rem; white-space:nowrap; } .insight-fields { padding:0 12px 12px; border-top:1px solid var(--divider-color); } .more-options, .thresholds, .metric-actions, .secondary-actions { margin-top:12px; } .thresholds, .metric-actions { padding:10px; border:1px solid var(--divider-color); border-radius:8px; } .two { display:grid; grid-template-columns:1fr 1fr; gap:8px; } .three { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:8px; align-items:end; } .checkbox { font-weight:400; } .checkbox input { width:auto; margin:0 6px 0 0; vertical-align:middle; } .threshold { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)) auto; gap:8px; align-items:end; margin-top:8px; } .threshold label { margin:0; } .insight-actions, .reorder { display:flex; align-items:center; gap:8px; } .insight-actions { justify-content:space-between; } .reorder button { padding:5px 7px; border:1px solid var(--divider-color); border-radius:5px; color:var(--primary-text-color); background:transparent; } .reorder button:disabled { opacity:.45; cursor:default; } .remove { padding:6px 0; color:var(--error-color); background:transparent; border:0; } .add { margin-top:12px; } @media (max-width:400px) { .purpose-grid, .two, .three, .threshold { grid-template-columns:1fr; } .suggestion-update { align-items:flex-start; flex-direction:column; } }
     .custom-rules { margin:14px 0; padding:10px; border:1px solid var(--divider-color); border-radius:8px; }
     .custom-rules .slot-hint { margin-bottom:8px; }
     .color-rule { display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1fr) auto; gap:8px; align-items:end; margin-top:8px; }

@@ -19,6 +19,8 @@ The card aggregates compatible sensors in an area: median temperature and humidi
 
 Need something more specific? Swap a slot to **A specific entity** and choose a media player, robot vacuum, weather, climate, battery sensor, or any other entity. For a two-part result such as air quality, choose **Custom combination**: one entity supplies the main state, another can supply the smaller supporting value, and optional state-to-colour rules keep the icon meaningful.
 
+When you want to go further, each insight's optional fine-tuning section keeps the advanced tools out of the initial setup: reorder or duplicate slots, choose what happens on tap, inspect aggregate contributors, pick an aggregation, add icon-colour thresholds, or polish the label and display.
+
 If HACS does not add the dashboard resource itself, add:
 
 ```yaml

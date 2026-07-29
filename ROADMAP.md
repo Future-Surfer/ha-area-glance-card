@@ -29,6 +29,8 @@ The card is not intended to become a generic dashboard layout engine, a templati
 
 ### 1. Insight arranging workflow
 
+**Status:** Implemented in the current development build.
+
 **Goal:** Make it quick to tailor a suggested card without recreating its contents.
 
 - Add drag-and-drop ordering in the visual editor, with accessible move-up/move-down controls as a fallback.
@@ -39,6 +41,8 @@ The card is not intended to become a generic dashboard layout engine, a templati
 **Done when:** a user can turn a suggested room card into their preferred order in a few deliberate interactions, without opening YAML.
 
 ### 2. Per-insight actions
+
+**Status:** Implemented in the current development build.
 
 **Goal:** Give each segment a predictable destination or behaviour.
 
@@ -51,6 +55,8 @@ The card is not intended to become a generic dashboard layout engine, a templati
 
 ### 3. Threshold colours for standard insights
 
+**Status:** Implemented in the current development build.
+
 **Goal:** Let ordinary slots communicate when a value needs attention without requiring Custom combination.
 
 - Add optional value bands to suitable standard metrics: temperature, humidity, power, battery, CO₂, PM2.5, VOC, and AQI.
@@ -62,6 +68,8 @@ The card is not intended to become a generic dashboard layout engine, a templati
 
 ### 4. Advanced aggregation and contributor transparency
 
+**Status:** Implemented in the current development build.
+
 **Goal:** Keep smart aggregation as the default while letting advanced users make it explicit.
 
 - For compatible area measurements, offer Advanced aggregation choices: median, highest, lowest, sum, or one specific entity where meaningful.
@@ -72,6 +80,8 @@ The card is not intended to become a generic dashboard layout engine, a templati
 **Done when:** automatic results are easy to trust, and a user can diagnose an unexpected value without leaving the card.
 
 ### 5. Entity-driven labels and display controls
+
+**Status:** Implemented in the current development build.
 
 **Goal:** Make an explicit entity slot feel polished without expanding the default editor flow.
 
