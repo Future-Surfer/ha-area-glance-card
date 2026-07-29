@@ -283,9 +283,13 @@ export class AreaGlanceCard extends LitElement {
 export class AreaGlanceCardEditor extends LitElement {
   public hass?: HassLike;
   private _config: AreaGlanceConfig = { title: "Area", metrics: DEFAULT_METRICS };
+  private _suggestionsNeedUpdate = false;
 
-  static get properties() { return { hass: { attribute: false }, _config: { state: true } }; }
-  public setConfig(config: AreaGlanceConfig) { this._config = { ...config, metrics: config.metrics?.length ? config.metrics : DEFAULT_METRICS }; }
+  static get properties() { return { hass: { attribute: false }, _config: { state: true }, _suggestionsNeedUpdate: { state: true } }; }
+  public setConfig(config: AreaGlanceConfig) {
+    this._config = { ...config, metrics: config.metrics?.length ? config.metrics : DEFAULT_METRICS };
+    this._suggestionsNeedUpdate = false;
+  }
 
   private _change(change: Partial<AreaGlanceConfig>) {
     this._config = { ...this._config, ...change };
@@ -298,6 +302,14 @@ export class AreaGlanceCardEditor extends LitElement {
     const source = (event.target as HTMLSelectElement).value as "area_motion" | "entity";
     this._change({ status: { ...this._config.status, source, ...(source === "area_motion" ? { entity: undefined } : {}) } });
   }
+  private _statusEnabledChanged(event: Event) {
+    const enabled = (event.target as HTMLInputElement).checked;
+    this._change({
+      status: enabled
+        ? this._config.status ?? { source: "area_motion", ...(this._config.area ? { area: this._config.area } : {}), show_last_changed: true, last_changed_text: "Last motion" }
+        : undefined,
+    });
+  }
   private _metricBoolean(index: number, key: "hidden") { return (event: Event) => this._updateMetric(index, { [key]: (event.target as HTMLInputElement).checked }); }
   private _layoutChanged(event: Event) { this._change({ layout: (event.target as HTMLSelectElement).value as AreaGlanceConfig["layout"] }); }
   private _heightChanged(event: Event) { this._change({ height: (event.target as HTMLSelectElement).value as AreaGlanceConfig["height"] }); }
@@ -308,6 +320,23 @@ export class AreaGlanceCardEditor extends LitElement {
       return;
     }
     this._change({ profile });
+    if (this._config.area) this._suggestionsNeedUpdate = true;
+  }
+  private _purpose() {
+    const profile = this._config.profile ?? "auto";
+    if (profile === "house") return "house";
+    if (profile === "energy") return "energy";
+    if (profile === "battery") return "battery";
+    return "area";
+  }
+  private _purposeSelected(purpose: "area" | "house" | "energy" | "battery") {
+    if (purpose === "house") {
+      this._populateAreaPreset("", "house");
+      return;
+    }
+    const profile = purpose === "area" ? "auto" : purpose;
+    this._change({ profile });
+    if (this._config.area) this._suggestionsNeedUpdate = true;
   }
   private _appearancePresetChanged(event: Event) {
     const preset = (event.target as HTMLSelectElement).value as NonNullable<NonNullable<AreaGlanceConfig["appearance"]>["preset"]>;
@@ -393,6 +422,7 @@ export class AreaGlanceCardEditor extends LitElement {
       if (profile === "room") addEntityMetric("device", device);
     }
     const motion = first((id) => id.startsWith("binary_sensor.") && hasDeviceClass(id, "motion"));
+    this._suggestionsNeedUpdate = false;
     this._change({
       area: area || undefined,
       profile: requestedProfile,
@@ -401,7 +431,17 @@ export class AreaGlanceCardEditor extends LitElement {
       metrics: metrics.length ? metrics : this._config.metrics,
     });
   }
-  private _areaSelected(event: Event) { this._populateAreaPreset(this._pickerValue(event)); }
+  private _areaSelected(event: Event) {
+    const area = this._pickerValue(event);
+    if (!area) return;
+    if (!this._config.area) {
+      this._populateAreaPreset(area);
+      return;
+    }
+    this._change({ area });
+    this._suggestionsNeedUpdate = true;
+  }
+  private _applySuggestions() { this._populateAreaPreset(this._config.area ?? "", this._config.profile ?? "auto"); }
   private _metricSourceChanged(index: number, event: Event) {
     const source = (event.target as HTMLSelectElement).value as "area" | "entity";
     this._updateMetric(index, { source, ...(source === "area" ? { entity: undefined } : {}) });
@@ -422,101 +462,72 @@ export class AreaGlanceCardEditor extends LitElement {
 
   protected render() {
     const metrics = this._config.metrics ?? [];
-    const visibleMetricCount = metrics.filter((metric) => !metric.hidden).length;
     const profile = this._config.profile ?? "auto";
+    const purpose = this._purpose();
     const appearancePreset = this._config.appearance?.preset ?? "theme";
     const status = this._config.status;
     const statusSource = status?.source ?? (status?.entity ? "entity" : "area_motion");
+    const areaLabel = purpose === "energy" ? "Which energy area?" : purpose === "battery" ? "Where is the battery system?" : "Which area?";
+    const currentAreaName = this._config.area ? this._areaName(this._config.area) : "this area";
     return html`<div class="editor">
       <h3>Area Glance</h3>
-      <p class="hint">Choose a title and up to five helpful at-a-glance metrics. Start with a preset; optional fields let you tailor it later.</p>
-      <label>Band layout
-        <select .value=${this._config.layout ?? "header"} @change=${this._layoutChanged}>
-          <option value="header">Header + metric segments</option>
-          <option value="metrics-only">Metric segments only</option>
-        </select>
-      </label>
-      <label>Card height
-        <select .value=${this._config.height ?? "compact"} @change=${this._heightChanged}>
-          <option value="compact">Compact (original style)</option>
-          <option value="standard">Standard</option>
-          <option value="comfortable">Comfortable</option>
-        </select>
-      </label>
-      <details class="appearance" open>
-        <summary>Appearance</summary>
-        <label>Colour preset
-          <select .value=${appearancePreset} @change=${this._appearancePresetChanged}>
-            <option value="theme">Theme default</option>
-            <option value="light">Light</option>
-            <option value="slate">Slate (energy-style)</option>
-            <option value="charcoal">Charcoal (house-style)</option>
-            <option value="custom">Custom background</option>
+      <p class="hint">Choose a place first. Area Glance suggests useful live insights; you can change any of them afterwards.</p>
+      <section class="setup">
+        <span class="section-label">What does this card show?</span>
+        <div class="purpose-grid">
+          ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"] ] as const).map(([value, title, description]) => html`<button class="purpose ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
+        </div>
+        ${purpose === "house" ? html`<p class="applied">Whole-home suggestions are applied. You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._config.area ?? ""} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
+        <details class="advanced-setup"><summary>Use a different suggestion style</summary><label>Suggestion style
+          <select .value=${profile} @change=${this._profileChanged}>
+            <option value="auto">Choose automatically</option><option value="room">Room</option><option value="media">Media room</option><option value="battery">Battery / garage</option><option value="energy">Energy</option><option value="house">Whole home</option>
           </select>
-        </label>
-        ${appearancePreset === "custom" ? html`<label>Background colour <input type="color" .value=${this._config.appearance?.background ?? "#353c45"} @input=${this._customBackgroundChanged}></label>` : nothing}
-        <label class="checkbox"><input type="checkbox" .checked=${this._config.appearance?.shadow !== false} @change=${this._shadowChanged}> Show drop shadow</label>
-      </details>
-      <p class="hint">${visibleMetricCount} visible metric segment${visibleMetricCount === 1 ? "" : "s"}. Add/remove metrics or hide one below; the band sizes the remaining segments automatically.</p>
-      <label>Starter profile
-        <select .value=${profile} @change=${this._profileChanged}>
-          <option value="auto">Auto (infer from area name)</option>
-          <option value="room">Room</option>
-          <option value="media">Media room</option>
-          <option value="battery">Battery / garage</option>
-          <option value="energy">Energy</option>
-          <option value="house">House-wide (no area)</option>
-        </select>
-      </label>
-      ${profile === "house" ? html`<p class="hint">House-wide scans the available entities, so leave the area blank.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._config.area ?? ""} .label=${"Area (select to populate a starter preset)"} @value-changed=${this._areaSelected}></ha-area-picker>`}
-      <button class="populate" ?disabled=${profile !== "house" && !this._config.area} @click=${() => this._populateAreaPreset(profile === "house" ? "" : this._config.area ?? "", profile)}>Populate slots from this profile</button>
-      ${this._config.layout !== "metrics-only" ? html`
-        <label>Title <input .value=${this._config.title ?? ""} placeholder="Living room" @input=${(e: Event) => this._input(e, "title")}></label>
-        <details ?open=${Boolean(status)}><summary>Status (optional)</summary>
-          <label>Status source
-            <select .value=${statusSource} @change=${this._statusSourceChanged}>
-              <option value="area_motion">Area motion sensors (recommended)</option>
-              <option value="entity">Specific entity</option>
-            </select>
-          </label>
-          ${statusSource === "area_motion" ? html`<ha-area-picker .hass=${this.hass} .value=${status?.area ?? this._config.area ?? ""} .label=${"Motion area"} @value-changed=${(e: Event) => this._change({ status: { ...status, source: "area_motion", area: this._pickerValue(e) } })}></ha-area-picker>` : statusSource === "entity" ? html`<ha-entity-picker .hass=${this.hass} .value=${status?.entity ?? ""} .label=${"Status entity"} allow-custom-entity @value-changed=${(e: Event) => this._change({ status: { ...status, source: "entity", entity: this._pickerValue(e) } })}></ha-entity-picker>` : nothing}
-          <div class="two"><label>Active text <input .value=${status?.active_text ?? ""} placeholder="Motion" @input=${(e: Event) => this._statusInput(e, "active_text")}></label><label>Inactive text <input .value=${status?.inactive_text ?? ""} placeholder="No motion" @input=${(e: Event) => this._statusInput(e, "inactive_text")}></label></div>
-          <label class="checkbox"><input type="checkbox" .checked=${status?.show_last_changed ?? false} @change=${(e: Event) => this._statusBoolean(e, "show_last_changed")}> Show when it last changed</label>
-          ${status?.show_last_changed ? html`<label>Inactive history text <input .value=${status?.last_changed_text ?? ""} placeholder="Last motion" @input=${(e: Event) => this._statusInput(e, "last_changed_text")}></label>` : nothing}
-        </details>` : html`<p class="hint">This layout deliberately omits the title and status header.</p>`}
-      <h3>Metrics</h3>
+        </label></details>
+      </section>
+      <section class="insights"><h3>Insights</h3><p class="hint">Keep up to five. They resize automatically to fit the card.</p>
       ${metrics.map((metric, index) => {
         const preset = metric.preset ?? "custom";
         const supportsArea = ["temperature", "humidity", "power", "co2"].includes(preset);
         const usesArea = preset === "lights" || (supportsArea && (metric.source ?? (metric.entity ? "entity" : "area")) === "area");
         const source = metric.source ?? (metric.entity ? "entity" : "area");
-        return html`<details class="metric-editor" open>
-        <summary>Slot ${index + 1} — ${PRESETS[preset].label}</summary>
-        <label>What is this slot about?
+        const sourceLabel = usesArea ? (preset === "lights" ? "Area count" : "Area aggregate") : "Specific entity";
+        return html`<details class="insight-editor">
+        <summary><ha-icon .icon=${metric.icon ?? PRESETS[preset].icon}></ha-icon><span class="insight-name">${PRESETS[preset].label}</span><span class="source-pill">${sourceLabel}</span></summary>
+        <div class="insight-fields"><label>What should this show?
           <select .value=${metric.preset ?? "custom"} @change=${(e: Event) => this._updateMetric(index, { preset: (e.target as HTMLSelectElement).value as MetricPreset })}>
             ${Object.entries(PRESETS).map(([preset, defaults]) => html`<option value=${preset}>${defaults.label}</option>`)}
           </select>
         </label>
         <p class="slot-hint">${SLOT_HELPERS[preset]}</p>
-        ${supportsArea ? html`<label>Source
+        ${supportsArea ? html`<label>Use data from
           <select .value=${source} @change=${(e: Event) => this._metricSourceChanged(index, e)}>
-            <option value="area">Area sensors (recommended)</option>
-            <option value="entity">Specific entity</option>
+            <option value="area">This area (recommended)</option>
+            <option value="entity">A specific entity</option>
           </select>
         </label>` : nothing}
         ${usesArea ? html`<ha-area-picker .hass=${this.hass} .value=${metric.area ?? this._config.area ?? ""} .label=${preset === "lights" ? "Area to count" : "Area to summarise"} @value-changed=${(e: Event) => this._updateMetric(index, { source: "area", area: this._pickerValue(e) })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${`${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>`}
-        <details><summary>Fine-tune this metric</summary>
+        <details class="more-options"><summary>More options</summary>
           <div class="two"><label>Label <input .value=${metric.label ?? ""} @input=${(e: Event) => this._updateMetric(index, { label: (e.target as HTMLInputElement).value })}></label><label>Icon <input .value=${metric.icon ?? ""} placeholder="mdi:thermometer" @input=${(e: Event) => this._updateMetric(index, { icon: (e.target as HTMLInputElement).value })}></label></div>
           <div class="two"><label>Colour <input .value=${metric.color ?? ""} placeholder="var(--primary-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value })}></label><label>Unit override <input .value=${metric.unit ?? ""} @input=${(e: Event) => this._updateMetric(index, { unit: (e.target as HTMLInputElement).value })}></label></div>
         </details>
-        <label class="checkbox"><input type="checkbox" .checked=${metric.hidden ?? false} @change=${this._metricBoolean(index, "hidden")}> Hide this metric</label>
-        <button class="remove" @click=${() => this._removeMetric(index)}>Remove metric</button>
+        <div class="insight-actions"><label class="checkbox"><input type="checkbox" .checked=${metric.hidden ?? false} @change=${this._metricBoolean(index, "hidden")}> Hide</label><button class="remove" @click=${() => this._removeMetric(index)}>Remove</button></div></div>
       </details>`})}
-      <button class="add" ?disabled=${metrics.length >= 5} @click=${this._addMetric}>Add metric</button>
+      <button class="add" ?disabled=${metrics.length >= 5} @click=${this._addMetric}>Add insight</button>
+      </section>
+      <details class="settings"><summary>Header</summary>
+        <label>Card layout<select .value=${this._config.layout ?? "header"} @change=${this._layoutChanged}><option value="header">Show area title and status</option><option value="metrics-only">Show insights only</option></select></label>
+        ${this._config.layout !== "metrics-only" ? html`<label>Title <input .value=${this._config.title ?? ""} placeholder=${currentAreaName} @input=${(e: Event) => this._input(e, "title")}></label><label class="checkbox"><input type="checkbox" .checked=${Boolean(status)} @change=${this._statusEnabledChanged}> Show a status line</label>${status ? html`<label>Status comes from<select .value=${statusSource} @change=${this._statusSourceChanged}><option value="area_motion">Motion in this area</option><option value="entity">A specific entity</option></select></label>${statusSource === "area_motion" ? html`<ha-area-picker .hass=${this.hass} .value=${status.area ?? this._config.area ?? ""} .label=${"Motion area"} @value-changed=${(e: Event) => this._change({ status: { ...status, source: "area_motion", area: this._pickerValue(e) } })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${status.entity ?? ""} .label=${"Status entity"} allow-custom-entity @value-changed=${(e: Event) => this._change({ status: { ...status, source: "entity", entity: this._pickerValue(e) } })}></ha-entity-picker>`}<div class="two"><label>When active <input .value=${status.active_text ?? ""} placeholder="Motion" @input=${(e: Event) => this._statusInput(e, "active_text")}></label><label>When inactive <input .value=${status.inactive_text ?? ""} placeholder="No motion" @input=${(e: Event) => this._statusInput(e, "inactive_text")}></label></div><label class="checkbox"><input type="checkbox" .checked=${status.show_last_changed ?? false} @change=${(e: Event) => this._statusBoolean(e, "show_last_changed")}> Show when it last changed</label>${status.show_last_changed ? html`<label>History label <input .value=${status.last_changed_text ?? ""} placeholder="Last motion" @input=${(e: Event) => this._statusInput(e, "last_changed_text")}></label>` : nothing}` : nothing}` : nothing}
+      </details>
+      <details class="settings"><summary>Card appearance</summary>
+        <label>Size<select .value=${this._config.height ?? "compact"} @change=${this._heightChanged}><option value="compact">Compact</option><option value="standard">Medium</option><option value="comfortable">Tall</option></select></label>
+        <label>Colour style<select .value=${appearancePreset} @change=${this._appearancePresetChanged}><option value="theme">Use dashboard theme</option><option value="light">Light</option><option value="slate">Slate</option><option value="charcoal">Dark</option><option value="custom">Custom background</option></select></label>
+        ${appearancePreset === "custom" ? html`<label>Background colour <input type="color" .value=${this._config.appearance?.background ?? "#353c45"} @input=${this._customBackgroundChanged}></label>` : nothing}
+        <label class="checkbox"><input type="checkbox" .checked=${this._config.appearance?.shadow !== false} @change=${this._shadowChanged}> Show drop shadow</label>
+      </details>
     </div>`;
   }
   static styles = css`
-    :host { display:block; } .editor { padding:12px; } h3 { margin:8px 0; } .hint, .slot-hint { color:var(--secondary-text-color); margin:0 0 12px; } .slot-hint { font-size:.88rem; margin:4px 0 10px; } label { display:block; font-weight:500; margin:10px 0; } ha-entity-picker, ha-area-picker { display:block; margin:12px 0; } input, select { box-sizing:border-box; width:100%; padding:8px; margin-top:4px; font:inherit; color:inherit; background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:4px; } .checkbox input { width:auto; margin:0 6px 0 0; vertical-align:middle; } details { border:1px solid var(--divider-color); border-radius:6px; padding:8px; margin:10px 0; } summary { cursor:pointer; font-weight:600; } .two { display:grid; grid-template-columns:1fr 1fr; gap:8px; } button { padding:8px 12px; border-radius:4px; cursor:pointer; font:inherit; } .populate { width:100%; margin:0 0 12px; color:var(--primary-color); background:transparent; border:1px solid var(--primary-color); } .populate:disabled { cursor:default; opacity:.45; } .add { color:white; background:var(--primary-color); border:0; } .remove { color:var(--error-color); background:transparent; border:0; padding-left:0; } @media (max-width: 400px) { .two { grid-template-columns:1fr; } }
+    :host { display:block; } .editor { padding:12px; } h3 { margin:0; } .hint, .slot-hint { color:var(--secondary-text-color); margin:4px 0 12px; } .slot-hint { font-size:.88rem; } label { display:block; font-weight:500; margin:12px 0; } ha-entity-picker, ha-area-picker { display:block; margin:12px 0; } input, select { box-sizing:border-box; width:100%; padding:8px; margin-top:4px; font:inherit; color:inherit; background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:6px; } button { cursor:pointer; font:inherit; } .setup, .insights { margin-top:18px; } .section-label { display:block; font-weight:600; margin-bottom:8px; } .purpose-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; } .purpose { text-align:left; min-height:62px; padding:10px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; } .purpose.selected { border:2px solid var(--primary-color); background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .purpose strong, .purpose small { display:block; } .purpose small { color:var(--secondary-text-color); font-size:.78rem; margin-top:3px; } .applied { color:var(--secondary-text-color); font-size:.9rem; margin:8px 0; } .suggestion-update { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:10px; margin-top:8px; border-radius:8px; background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .suggestion-update span { font-size:.88rem; } .primary, .add { padding:8px 12px; color:white; background:var(--primary-color); border:0; border-radius:6px; white-space:nowrap; } .advanced-setup, .settings, .insight-editor { border:1px solid var(--divider-color); border-radius:8px; padding:10px; margin-top:12px; } summary { cursor:pointer; font-weight:600; } .advanced-setup summary, .settings summary, .more-options summary { color:var(--secondary-text-color); } .insight-editor { padding:0; overflow:hidden; } .insight-editor > summary { display:flex; align-items:center; gap:8px; padding:12px; list-style:none; } .insight-editor > summary::-webkit-details-marker { display:none; } .insight-editor > summary::after { content:"›"; margin-left:auto; color:var(--secondary-text-color); font-size:1.4rem; } .insight-editor[open] > summary::after { transform:rotate(90deg); } .insight-editor ha-icon { width:22px; height:22px; color:var(--primary-color); } .insight-name { min-width:0; flex:1; } .source-pill { padding:3px 6px; border-radius:999px; color:var(--secondary-text-color); background:color-mix(in srgb, var(--secondary-text-color) 12%, transparent); font-size:.72rem; white-space:nowrap; } .insight-fields { padding:0 12px 12px; border-top:1px solid var(--divider-color); } .more-options { margin-top:12px; } .two { display:grid; grid-template-columns:1fr 1fr; gap:8px; } .checkbox { font-weight:400; } .checkbox input { width:auto; margin:0 6px 0 0; vertical-align:middle; } .insight-actions { display:flex; align-items:center; justify-content:space-between; } .remove { padding:6px 0; color:var(--error-color); background:transparent; border:0; } .add { margin-top:12px; } @media (max-width:400px) { .purpose-grid, .two { grid-template-columns:1fr; } .suggestion-update { align-items:flex-start; flex-direction:column; } }
   `;
 }
 
