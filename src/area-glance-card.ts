@@ -15,9 +15,10 @@ const SLOT_HELPERS: Record<MetricPreset, string> = {
   custom: "Show an entity using its native state and unit.",
 };
 const HEIGHT_OPTIONS = {
-  compact: { contentHeight: 78, rows: 1.5, scale: 1 },
-  standard: { contentHeight: 102, rows: 2, scale: 1.24 },
-  comfortable: { contentHeight: 126, rows: 2.5, scale: 1.48 },
+  slim: { contentHeight: 64, stackedContentHeight: 122, metricRowHeight: 54, rows: 2, stackedRows: 3, scale: 0.82 },
+  compact: { contentHeight: 78, stackedContentHeight: 140, metricRowHeight: 62, rows: 2, stackedRows: 3, scale: 1 },
+  standard: { contentHeight: 94, stackedContentHeight: 160, metricRowHeight: 72, rows: 2, stackedRows: 3, scale: 1.15 },
+  comfortable: { contentHeight: 114, stackedContentHeight: 188, metricRowHeight: 84, rows: 3, stackedRows: 4, scale: 1.3 },
 } as const;
 const APPEARANCE_PRESETS = {
   theme: { theme: "auto", background: undefined },
@@ -72,9 +73,13 @@ export class AreaGlanceCard extends LitElement {
   }
 
   private _heightOption() { return HEIGHT_OPTIONS[this._config?.height ?? "compact"]; }
+  private _gridRows() {
+    const height = this._heightOption();
+    return this._config?.layout === "stacked" ? height.stackedRows : height.rows;
+  }
 
-  public getCardSize() { return this._heightOption().rows; }
-  public getGridOptions() { const rows = this._heightOption().rows; return { rows, columns: 12, min_rows: rows, max_rows: rows, min_columns: 6 }; }
+  public getCardSize() { return this._gridRows(); }
+  public getGridOptions() { const rows = this._gridRows(); return { rows, columns: 12, min_rows: rows, max_rows: rows, min_columns: 6 }; }
 
   protected willUpdate(changed: PropertyValues<this>) {
     if (changed.has("hass")) this.requestUpdate();
@@ -206,7 +211,8 @@ export class AreaGlanceCard extends LitElement {
     const height = this._heightOption();
     const accent = this._config?.accent_color ? `--area-glance-accent:${this._config.accent_color};` : "";
     const scale = height.scale;
-    return `${accent}--area-glance-content-height:${height.contentHeight}px;--area-glance-pad-y:${Math.round(8 * scale)}px;--area-glance-pad-x:${Math.round(12 * scale)}px;--area-glance-title-size:${(1.8 * scale).toFixed(2)}rem;--area-glance-status-size:${(.85 * scale).toFixed(2)}rem;--area-glance-icon-size:${Math.round(24 * scale)}px;--area-glance-value-size:${(1.6 * scale).toFixed(2)}rem;--area-glance-label-size:${(.82 * scale).toFixed(2)}rem;--area-glance-metric-padding:${Math.max(2, Math.round(3 * scale))}px;`;
+    const stacked = this._config?.layout === "stacked";
+    return `${accent}--area-glance-content-height:${stacked ? height.stackedContentHeight : height.contentHeight}px;--area-glance-metrics-height:${height.metricRowHeight}px;--area-glance-pad-y:${Math.round(8 * scale)}px;--area-glance-pad-x:${Math.round(12 * scale)}px;--area-glance-title-size:${(1.8 * scale).toFixed(2)}rem;--area-glance-status-size:${(.85 * scale).toFixed(2)}rem;--area-glance-icon-size:${Math.round(24 * scale)}px;--area-glance-value-size:${(1.6 * scale).toFixed(2)}rem;--area-glance-label-size:${(.82 * scale).toFixed(2)}rem;--area-glance-metric-padding:${Math.max(2, Math.round(3 * scale))}px;`;
   }
 
   private _runAction(action?: ActionConfig, fallbackEntity?: string) {
@@ -238,7 +244,7 @@ export class AreaGlanceCard extends LitElement {
     const noShadow = appearance?.shadow === false;
     return html`
       <ha-card class=${`${this._config.theme === "dark" ? "force-dark" : this._config.theme === "light" ? "force-light" : ""}${noShadow ? " no-shadow" : ""}`} style=${`--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);${background ? `--area-glance-card-background:${background}` : ""}`} @click=${() => this._runAction()}>
-        <section class=${showHeader ? "layout" : "layout metrics-only"} style=${this._layoutStyle()}>
+        <section class=${showHeader ? `layout${this._config.layout === "stacked" ? " stacked" : ""}` : "layout metrics-only"} style=${this._layoutStyle()}>
           ${showHeader ? html`<div class="summary">
               <div class="title">${title}</div>
               ${status.line ? html`<div class="status"><span class="dot" style=${`background:${status.color}`}></span><span><span>${status.line}</span>${status.age ? html`<small>${status.age}</small>` : nothing}</span></div>` : nothing}
@@ -257,11 +263,15 @@ export class AreaGlanceCard extends LitElement {
   }
 
   static styles = css`
-    :host { display:block; --area-glance-accent:var(--primary-color); }
+    :host { display:block; padding-block:4px; --area-glance-accent:var(--primary-color); }
     ha-card { overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 8%, transparent); border-radius:var(--area-glance-card-border-radius, 24px); cursor:pointer; background:var(--area-glance-card-background, var(--ha-card-background, var(--card-background-color))); box-shadow:var(--ha-card-box-shadow, 0 8px 24px rgb(0 0 0 / 18%)); }
     ha-card.no-shadow { box-shadow:none; }
     .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:minmax(126px, 1.65fr) minmax(0, 4fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
     .layout.metrics-only { grid-template-columns:minmax(0, 1fr); }
+    .layout.stacked { grid-template-columns:minmax(0, 1fr); grid-template-rows:auto minmax(var(--area-glance-metrics-height, 62px), 1fr); gap:8px; }
+    .layout.stacked .summary { padding:3px 4px 0; }
+    .layout.stacked .metrics { min-height:var(--area-glance-metrics-height, 62px); }
+    .layout.stacked .metric:first-child { border-left:0; }
     .summary { min-width:0; align-self:center; padding:3px 8px 3px 4px; }
     .title { color:var(--primary-text-color); font-size:var(--area-glance-title-size, 1.8rem); font-weight:720; letter-spacing:-.03em; line-height:1.12; padding-block:.03em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .status { color:var(--secondary-text-color); display:flex; gap:6px; align-items:flex-start; margin-top:5px; font-size:var(--area-glance-status-size, .85rem); line-height:1.15; min-width:0; }
@@ -288,7 +298,6 @@ export class AreaGlanceCardEditor extends LitElement {
   static get properties() { return { hass: { attribute: false }, _config: { state: true }, _suggestionsNeedUpdate: { state: true } }; }
   public setConfig(config: AreaGlanceConfig) {
     this._config = { ...config, metrics: config.metrics?.length ? config.metrics : DEFAULT_METRICS };
-    this._suggestionsNeedUpdate = false;
   }
 
   private _change(change: Partial<AreaGlanceConfig>) {
@@ -313,15 +322,6 @@ export class AreaGlanceCardEditor extends LitElement {
   private _metricBoolean(index: number, key: "hidden") { return (event: Event) => this._updateMetric(index, { [key]: (event.target as HTMLInputElement).checked }); }
   private _layoutChanged(event: Event) { this._change({ layout: (event.target as HTMLSelectElement).value as AreaGlanceConfig["layout"] }); }
   private _heightChanged(event: Event) { this._change({ height: (event.target as HTMLSelectElement).value as AreaGlanceConfig["height"] }); }
-  private _profileChanged(event: Event) {
-    const profile = (event.target as HTMLSelectElement).value as NonNullable<AreaGlanceConfig["profile"]>;
-    if (profile === "house") {
-      this._populateAreaPreset("", profile);
-      return;
-    }
-    this._change({ profile });
-    if (this._config.area) this._suggestionsNeedUpdate = true;
-  }
   private _purpose() {
     const profile = this._config.profile ?? "auto";
     if (profile === "house") return "house";
@@ -462,7 +462,6 @@ export class AreaGlanceCardEditor extends LitElement {
 
   protected render() {
     const metrics = this._config.metrics ?? [];
-    const profile = this._config.profile ?? "auto";
     const purpose = this._purpose();
     const appearancePreset = this._config.appearance?.preset ?? "theme";
     const status = this._config.status;
@@ -478,11 +477,6 @@ export class AreaGlanceCardEditor extends LitElement {
           ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"] ] as const).map(([value, title, description]) => html`<button class="purpose ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
         </div>
         ${purpose === "house" ? html`<p class="applied">Whole-home suggestions are applied. You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._config.area ?? ""} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
-        <details class="advanced-setup"><summary>Use a different suggestion style</summary><label>Suggestion style
-          <select .value=${profile} @change=${this._profileChanged}>
-            <option value="auto">Choose automatically</option><option value="room">Room</option><option value="media">Media room</option><option value="battery">Battery / garage</option><option value="energy">Energy</option><option value="house">Whole home</option>
-          </select>
-        </label></details>
       </section>
       <section class="insights"><h3>Insights</h3><p class="hint">Keep up to five. They resize automatically to fit the card.</p>
       ${metrics.map((metric, index) => {
@@ -507,7 +501,7 @@ export class AreaGlanceCardEditor extends LitElement {
         </label>` : nothing}
         ${usesArea ? html`<ha-area-picker .hass=${this.hass} .value=${metric.area ?? this._config.area ?? ""} .label=${preset === "lights" ? "Area to count" : "Area to summarise"} @value-changed=${(e: Event) => this._updateMetric(index, { source: "area", area: this._pickerValue(e) })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${`${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>`}
         <details class="more-options"><summary>More options</summary>
-          <div class="two"><label>Label <input .value=${metric.label ?? ""} @input=${(e: Event) => this._updateMetric(index, { label: (e.target as HTMLInputElement).value })}></label><label>Icon <input .value=${metric.icon ?? ""} placeholder="mdi:thermometer" @input=${(e: Event) => this._updateMetric(index, { icon: (e.target as HTMLInputElement).value })}></label></div>
+          <div class="two"><label>Label <input .value=${metric.label ?? ""} @input=${(e: Event) => this._updateMetric(index, { label: (e.target as HTMLInputElement).value })}></label><ha-icon-picker label="Icon" .value=${metric.icon ?? ""} .placeholder=${PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon: this._pickerValue(e) })}></ha-icon-picker></div>
           <div class="two"><label>Colour <input .value=${metric.color ?? ""} placeholder="var(--primary-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value })}></label><label>Unit override <input .value=${metric.unit ?? ""} @input=${(e: Event) => this._updateMetric(index, { unit: (e.target as HTMLInputElement).value })}></label></div>
         </details>
         <div class="insight-actions"><label class="checkbox"><input type="checkbox" .checked=${metric.hidden ?? false} @change=${this._metricBoolean(index, "hidden")}> Hide</label><button class="remove" @click=${() => this._removeMetric(index)}>Remove</button></div></div>
@@ -515,11 +509,11 @@ export class AreaGlanceCardEditor extends LitElement {
       <button class="add" ?disabled=${metrics.length >= 5} @click=${this._addMetric}>Add insight</button>
       </section>
       <details class="settings"><summary>Header</summary>
-        <label>Card layout<select .value=${this._config.layout ?? "header"} @change=${this._layoutChanged}><option value="header">Show area title and status</option><option value="metrics-only">Show insights only</option></select></label>
+        <label>Card layout<select .value=${this._config.layout ?? "header"} @change=${this._layoutChanged}><option value="header">Title beside insights (default)</option><option value="stacked">Title above insights</option><option value="metrics-only">Insights only</option></select></label>
         ${this._config.layout !== "metrics-only" ? html`<label>Title <input .value=${this._config.title ?? ""} placeholder=${currentAreaName} @input=${(e: Event) => this._input(e, "title")}></label><label class="checkbox"><input type="checkbox" .checked=${Boolean(status)} @change=${this._statusEnabledChanged}> Show a status line</label>${status ? html`<label>Status comes from<select .value=${statusSource} @change=${this._statusSourceChanged}><option value="area_motion">Motion in this area</option><option value="entity">A specific entity</option></select></label>${statusSource === "area_motion" ? html`<ha-area-picker .hass=${this.hass} .value=${status.area ?? this._config.area ?? ""} .label=${"Motion area"} @value-changed=${(e: Event) => this._change({ status: { ...status, source: "area_motion", area: this._pickerValue(e) } })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${status.entity ?? ""} .label=${"Status entity"} allow-custom-entity @value-changed=${(e: Event) => this._change({ status: { ...status, source: "entity", entity: this._pickerValue(e) } })}></ha-entity-picker>`}<div class="two"><label>When active <input .value=${status.active_text ?? ""} placeholder="Motion" @input=${(e: Event) => this._statusInput(e, "active_text")}></label><label>When inactive <input .value=${status.inactive_text ?? ""} placeholder="No motion" @input=${(e: Event) => this._statusInput(e, "inactive_text")}></label></div><label class="checkbox"><input type="checkbox" .checked=${status.show_last_changed ?? false} @change=${(e: Event) => this._statusBoolean(e, "show_last_changed")}> Show when it last changed</label>${status.show_last_changed ? html`<label>History label <input .value=${status.last_changed_text ?? ""} placeholder="Last motion" @input=${(e: Event) => this._statusInput(e, "last_changed_text")}></label>` : nothing}` : nothing}` : nothing}
       </details>
       <details class="settings"><summary>Card appearance</summary>
-        <label>Size<select .value=${this._config.height ?? "compact"} @change=${this._heightChanged}><option value="compact">Compact</option><option value="standard">Medium</option><option value="comfortable">Tall</option></select></label>
+        <label>Size<select .value=${this._config.height ?? "compact"} @change=${this._heightChanged}><option value="slim">Slim</option><option value="compact">Compact (default)</option><option value="standard">Medium</option><option value="comfortable">Tall</option></select></label>
         <label>Colour style<select .value=${appearancePreset} @change=${this._appearancePresetChanged}><option value="theme">Use dashboard theme</option><option value="light">Light</option><option value="slate">Slate</option><option value="charcoal">Dark</option><option value="custom">Custom background</option></select></label>
         ${appearancePreset === "custom" ? html`<label>Background colour <input type="color" .value=${this._config.appearance?.background ?? "#353c45"} @input=${this._customBackgroundChanged}></label>` : nothing}
         <label class="checkbox"><input type="checkbox" .checked=${this._config.appearance?.shadow !== false} @change=${this._shadowChanged}> Show drop shadow</label>
@@ -528,6 +522,8 @@ export class AreaGlanceCardEditor extends LitElement {
   }
   static styles = css`
     :host { display:block; } .editor { padding:12px; } h3 { margin:0; } .hint, .slot-hint { color:var(--secondary-text-color); margin:4px 0 12px; } .slot-hint { font-size:.88rem; } label { display:block; font-weight:500; margin:12px 0; } ha-entity-picker, ha-area-picker { display:block; margin:12px 0; } input, select { box-sizing:border-box; width:100%; padding:8px; margin-top:4px; font:inherit; color:inherit; background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:6px; } button { cursor:pointer; font:inherit; } .setup, .insights { margin-top:18px; } .section-label { display:block; font-weight:600; margin-bottom:8px; } .purpose-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; } .purpose { text-align:left; min-height:62px; padding:10px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; } .purpose.selected { border:2px solid var(--primary-color); background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .purpose strong, .purpose small { display:block; } .purpose small { color:var(--secondary-text-color); font-size:.78rem; margin-top:3px; } .applied { color:var(--secondary-text-color); font-size:.9rem; margin:8px 0; } .suggestion-update { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:10px; margin-top:8px; border-radius:8px; background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .suggestion-update span { font-size:.88rem; } .primary, .add { padding:8px 12px; color:white; background:var(--primary-color); border:0; border-radius:6px; white-space:nowrap; } .advanced-setup, .settings, .insight-editor { border:1px solid var(--divider-color); border-radius:8px; padding:10px; margin-top:12px; } summary { cursor:pointer; font-weight:600; } .advanced-setup summary, .settings summary, .more-options summary { color:var(--secondary-text-color); } .insight-editor { padding:0; overflow:hidden; } .insight-editor > summary { display:flex; align-items:center; gap:8px; padding:12px; list-style:none; } .insight-editor > summary::-webkit-details-marker { display:none; } .insight-editor > summary::after { content:"›"; margin-left:auto; color:var(--secondary-text-color); font-size:1.4rem; } .insight-editor[open] > summary::after { transform:rotate(90deg); } .insight-editor ha-icon { width:22px; height:22px; color:var(--primary-color); } .insight-name { min-width:0; flex:1; } .source-pill { padding:3px 6px; border-radius:999px; color:var(--secondary-text-color); background:color-mix(in srgb, var(--secondary-text-color) 12%, transparent); font-size:.72rem; white-space:nowrap; } .insight-fields { padding:0 12px 12px; border-top:1px solid var(--divider-color); } .more-options { margin-top:12px; } .two { display:grid; grid-template-columns:1fr 1fr; gap:8px; } .checkbox { font-weight:400; } .checkbox input { width:auto; margin:0 6px 0 0; vertical-align:middle; } .insight-actions { display:flex; align-items:center; justify-content:space-between; } .remove { padding:6px 0; color:var(--error-color); background:transparent; border:0; } .add { margin-top:12px; } @media (max-width:400px) { .purpose-grid, .two { grid-template-columns:1fr; } .suggestion-update { align-items:flex-start; flex-direction:column; } }
+    ha-icon-picker { display:block; margin:12px 0; }
+    .two ha-icon-picker { align-self:end; }
   `;
 }
 

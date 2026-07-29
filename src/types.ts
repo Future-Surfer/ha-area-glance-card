@@ -65,8 +65,8 @@ export interface AreaGlanceConfig extends ActionConfig {
   area?: string;
   status?: StatusConfig;
   metrics?: MetricConfig[];
-  layout?: "header" | "metrics-only";
-  height?: "compact" | "standard" | "comfortable";
+  layout?: "header" | "stacked" | "metrics-only";
+  height?: "slim" | "compact" | "standard" | "comfortable";
   profile?: "auto" | "room" | "media" | "battery" | "energy" | "house";
   appearance?: {
     preset?: "theme" | "light" | "slate" | "charcoal" | "custom";
