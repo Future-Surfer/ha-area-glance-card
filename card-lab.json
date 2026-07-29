@@ -1,0 +1,21 @@
+{
+  "name": "Area Glance Card",
+  "description": "Compact, preset-led area summaries. Configure the five most useful signals instead of composing a grid of template cards.",
+  "documentationExport": true,
+  "presets": [
+    {
+      "id": "living-room",
+      "name": "Living room",
+      "yaml": "type: custom:area-glance-card\ntitle: Living\narea: living_room\nstatus:\n  entity: binary_sensor.living_room_motion\n  active_text: Motion\n  inactive_text: No motion\n  show_last_changed: true\nmetrics:\n  - preset: temperature\n    entity: sensor.living_room_temperature\n  - preset: lights\n    area: living_room\n  - preset: power\n    entity: sensor.living_room_power\n  - preset: device\n    entity: media_player.lounge\n    label: TV\n    icon: mdi:television\n",
+      "theme": "light",
+      "viewport": "768px"
+    },
+    {
+      "id": "energy",
+      "name": "Energy",
+      "yaml": "type: custom:area-glance-card\ntitle: Energy\ntheme: dark\nstatus:\n  entity: sensor.net_energy_cost\n  active_text: Net cost £2.53 today\n  inactive_text: No cost data\nmetrics:\n  - preset: power\n    entity: sensor.home_power\n    label: Home\n    icon: mdi:home-lightning-bolt\n  - preset: power\n    entity: sensor.solar_power\n    label: Solar\n    icon: mdi:solar-power-variant\n  - preset: battery\n    entity: sensor.battery_soc\n  - preset: power\n    entity: sensor.grid_export\n    label: Export\n    icon: mdi:transmission-tower-export\n",
+      "theme": "dark",
+      "viewport": "768px"
+    }
+  ]
+}

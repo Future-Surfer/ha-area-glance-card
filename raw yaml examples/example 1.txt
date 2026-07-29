@@ -1,0 +1,204 @@
+type: custom:button-card
+show_icon: false
+show_name: false
+show_state: false
+triggers_update:
+  - zone.home
+  - person.lewis_pearson
+  - person.megan_joseph
+  - binary_sensor.house_occupied
+  - binary_sensor.front_door_sensor_opening
+  - binary_sensor.hue_secure_contact_sensor_2_opening
+  - binary_sensor.hue_secure_contact_sensor_3_opening
+  - sensor.hue_motion_sensor_1_temperature_3
+  - sensor.hue_outdoor_motion_sensor_1_temperature
+tap_action:
+  action: more-info
+  entity: binary_sensor.house_occupied
+styles:
+  card:
+    - height: 78px
+    - border-radius: 24px
+    - padding: 8px 12px
+    - background: rgba(18, 24, 32, 0.82)
+    - border: 1px solid rgba(255,255,255,0.08)
+    - box-shadow: 0 8px 24px rgba(0,0,0,0.30)
+    - overflow: hidden
+  grid:
+    - grid-template-areas: "\"house inside outside lights occupancy\""
+    - grid-template-columns: 1.65fr 0.85fr 0.85fr 0.85fr 0.9fr
+    - align-items: center
+    - column-gap: 0px
+  custom_fields:
+    house:
+      - grid-area: house
+      - border-right: 1px solid rgba(255,255,255,0.10)
+      - padding-right: 8px
+      - min-width: 0
+      - overflow: hidden
+    inside:
+      - grid-area: inside
+      - border-right: 1px solid rgba(255,255,255,0.10)
+      - min-width: 0
+      - overflow: hidden
+    outside:
+      - grid-area: outside
+      - border-right: 1px solid rgba(255,255,255,0.10)
+      - min-width: 0
+      - overflow: hidden
+    lights:
+      - grid-area: lights
+      - border-right: 1px solid rgba(255,255,255,0.10)
+      - min-width: 0
+      - overflow: hidden
+    occupancy:
+      - grid-area: occupancy
+      - min-width: 0
+      - overflow: hidden
+custom_fields:
+  house: |
+    [[[
+      const doors = [
+        {
+          entity: 'binary_sensor.front_door_sensor_opening',
+          name: 'Front door',
+          shortName: 'Front'
+        },
+        {
+          entity: 'binary_sensor.hue_secure_contact_sensor_2_opening',
+          name: 'Garage door',
+          shortName: 'Garage'
+        },
+        {
+          entity: 'binary_sensor.hue_secure_contact_sensor_3_opening',
+          name: 'Garage back',
+          shortName: 'Garage back'
+        }
+      ];
+
+      const openDoors = doors.filter(d => states[d.entity]?.state === 'on');
+
+      let line1 = 'All doors';
+      let line2 = 'closed';
+
+      if (openDoors.length === 1) {
+        line1 = openDoors[0].name;
+        line2 = 'open';
+      } else if (openDoors.length > 1) {
+        line1 = `${openDoors.length} doors open`;
+        line2 = openDoors.map(d => d.shortName).join(', ');
+      }
+
+      const dotColour = openDoors.length === 0 ? '#49d44f' : '#ff9f1a';
+
+      return `
+        <div style="min-width:0;overflow:hidden;">
+          <div style="font-size:24px;font-weight:700;line-height:1;color:#f5f7fb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+            House
+          </div>
+          <div style="display:flex;align-items:flex-start;gap:6px;margin-top:5px;min-width:0;color:#9aa4b2;">
+            <span style="color:${dotColour};font-size:13px;line-height:1.1;">●</span>
+            <div style="font-size:12px;line-height:1.15;min-width:0;overflow:hidden;">
+              <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${line1}</div>
+              <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${line2}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    ]]]
+  inside: |
+    [[[
+      const s = states['sensor.hue_motion_sensor_1_temperature_3'];
+      const raw = s ? Number(s.state) : NaN;
+      const val = Number.isFinite(raw) ? Math.round(raw) : '–';
+
+      return `
+        <div style="text-align:center;min-width:0;overflow:hidden;">
+          <ha-icon icon="mdi:home-thermometer" style="width:22px;height:22px;color:#2ea8ff;"></ha-icon>
+          <div style="font-size:18px;font-weight:650;color:#f5f7fb;line-height:1.05;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:clip;">${val}°</div>
+          <div style="font-size:11px;color:#8d96a6;line-height:1.1;">Inside</div>
+        </div>
+      `;
+    ]]]
+  outside: |
+    [[[
+      const s = states['sensor.hue_outdoor_motion_sensor_1_temperature'];
+      const raw = s ? Number(s.state) : NaN;
+      const val = Number.isFinite(raw) ? Math.round(raw) : '–';
+
+      return `
+        <div style="text-align:center;min-width:0;overflow:hidden;">
+          <ha-icon icon="mdi:thermometer-lines" style="width:22px;height:22px;color:#60a5fa;"></ha-icon>
+          <div style="font-size:18px;font-weight:650;color:#f5f7fb;line-height:1.05;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:clip;">${val}°</div>
+          <div style="font-size:11px;color:#8d96a6;line-height:1.1;">Outside</div>
+        </div>
+      `;
+    ]]]
+  lights: |
+    [[[
+      const lightEntities = Object.keys(states).filter((entityId) => {
+        if (!entityId.startsWith('light.')) return false;
+
+        const exclude = [
+          // Add light groups here if your count looks inflated.
+          // 'light.kitchen',
+          // 'light.living_room',
+          // 'light.bedroom'
+        ];
+
+        return !exclude.includes(entityId);
+      });
+
+      const on = lightEntities.filter((entityId) => states[entityId]?.state === 'on').length;
+      const total = lightEntities.length;
+
+      return `
+        <div style="text-align:center;min-width:0;overflow:hidden;">
+          <ha-icon icon="mdi:lightbulb-group-outline" style="width:22px;height:22px;color:#ffd84d;"></ha-icon>
+          <div style="font-size:18px;font-weight:650;color:#f5f7fb;line-height:1.05;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:clip;">${on}/${total}</div>
+          <div style="font-size:11px;color:#8d96a6;line-height:1.1;">Lights</div>
+        </div>
+      `;
+    ]]]
+  occupancy: |
+    [[[
+      const people = [
+        'person.lewis_pearson',
+        'person.megan_joseph'
+      ];
+
+      let count = people.filter(p => states[p]?.state === 'home').length;
+
+      const zoneHome = Number(states['zone.home']?.state);
+      if (Number.isFinite(zoneHome)) {
+        count = zoneHome;
+      }
+
+      const occupiedSensor = states['binary_sensor.house_occupied']?.state;
+      const occupied = occupiedSensor === 'on' || count > 0;
+
+      const val = Number.isFinite(count) ? count : occupied ? 'Yes' : '0';
+      const label = occupied ? 'Home' : 'Away';
+
+      let icon = 'mdi:home-account';
+      let colour = occupied ? '#49d44f' : '#8d96a6';
+
+      if (!occupied) {
+        icon = 'mdi:home-outline';
+      } else if (count >= 2) {
+        icon = 'mdi:account-group';
+      } else {
+        icon = 'mdi:account';
+      }
+
+      return `
+        <div style="text-align:center;min-width:0;overflow:hidden;">
+          <ha-icon icon="${icon}" style="width:22px;height:22px;color:${colour};"></ha-icon>
+          <div style="font-size:18px;font-weight:650;color:#f5f7fb;line-height:1.05;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:clip;">${val}</div>
+          <div style="font-size:11px;color:#8d96a6;line-height:1.1;">${label}</div>
+        </div>
+      `;
+    ]]]
+grid_options:
+  columns: full
+  rows: 1.5

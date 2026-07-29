@@ -1,0 +1,172 @@
+type: custom:button-card
+show_icon: false
+show_name: false
+show_state: false
+triggers_update: all
+tap_action:
+  action: navigate
+  navigation_path: /energy
+styles:
+  card:
+    - height: 78px
+    - border-radius: 24px
+    - padding: 8px 12px
+    - background: rgba(120, 128, 138, 0.92)
+    - border: 1px solid rgba(255,255,255,0.16)
+    - box-shadow: 0 8px 24px rgba(0,0,0,0.22)
+    - overflow: hidden
+  grid:
+    - grid-template-areas: "\"utility home solar battery grid\""
+    - grid-template-columns: 1.65fr 0.95fr 0.95fr 0.95fr 0.95fr
+    - align-items: center
+    - column-gap: 0px
+  custom_fields:
+    utility:
+      - grid-area: utility
+      - border-right: 1px solid rgba(255,255,255,0.18)
+      - padding-right: 8px
+      - min-width: 0
+      - overflow: hidden
+    home:
+      - grid-area: home
+      - border-right: 1px solid rgba(255,255,255,0.18)
+      - min-width: 0
+      - overflow: hidden
+    solar:
+      - grid-area: solar
+      - border-right: 1px solid rgba(255,255,255,0.18)
+      - min-width: 0
+      - overflow: hidden
+    battery:
+      - grid-area: battery
+      - border-right: 1px solid rgba(255,255,255,0.18)
+      - min-width: 0
+      - overflow: hidden
+    grid:
+      - grid-area: grid
+      - min-width: 0
+      - overflow: hidden
+custom_fields:
+  utility: |
+    [[[
+      const costSensor = states['sensor.net_utility_cost'];
+      const rawCost = costSensor ? Number(costSensor.state) : NaN;
+
+      let line1 = 'Energy';
+      let line2 = 'Cost unknown';
+      let dotColour = '#d1d5db';
+
+      if (Number.isFinite(rawCost)) {
+        const sign = rawCost < 0 ? '-' : '';
+        const cost = `£${Math.abs(rawCost).toFixed(2)}`;
+        line2 = `${sign}${cost} today`;
+
+        if (rawCost < 0) {
+          dotColour = '#30c94a';
+        } else if (rawCost < 2) {
+          dotColour = '#60a5fa';
+        } else if (rawCost < 5) {
+          dotColour = '#ffd84d';
+        } else {
+          dotColour = '#ff5c5c';
+        }
+      }
+
+      return `
+        <div style="min-width:0;overflow:hidden;">
+          <div style="font-size:24px;font-weight:700;line-height:1;color:#ffffff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+            ${line1}
+          </div>
+          <div style="display:flex;align-items:flex-start;gap:6px;margin-top:5px;min-width:0;color:#e5e7eb;">
+            <span style="color:${dotColour};font-size:13px;line-height:1.1;">●</span>
+            <div style="font-size:12px;line-height:1.15;min-width:0;overflow:hidden;">
+              <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Net cost</div>
+              <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${line2}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    ]]]
+  home: |
+    [[[
+      const s = states['sensor.myenergi_home_home_consumption'];
+      const raw = s ? Number(s.state) : NaN;
+      const val = Number.isFinite(raw) ? Math.round(raw) : '–';
+
+      return `
+        <div style="text-align:center;min-width:0;overflow:hidden;">
+          <ha-icon icon="mdi:home-lightning-bolt" style="width:22px;height:22px;color:#dbeafe;"></ha-icon>
+          <div style="font-size:18px;font-weight:700;color:#ffffff;line-height:1.05;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:clip;">${val}W</div>
+          <div style="font-size:11px;color:#e5e7eb;line-height:1.1;">Home</div>
+        </div>
+      `;
+    ]]]
+  solar: |
+    [[[
+      const s = states['sensor.myenergi_home_power_generation'];
+      const raw = s ? Number(s.state) : NaN;
+      const val = Number.isFinite(raw) ? Math.round(raw) : '–';
+      const active = Number.isFinite(raw) && raw > 50;
+
+      return `
+        <div style="text-align:center;min-width:0;overflow:hidden;">
+          <ha-icon icon="mdi:solar-power-variant" style="width:22px;height:22px;color:${active ? '#ffd84d' : '#d1d5db'};"></ha-icon>
+          <div style="font-size:18px;font-weight:700;color:#ffffff;line-height:1.05;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:clip;">${val}W</div>
+          <div style="font-size:11px;color:#e5e7eb;line-height:1.1;">Solar</div>
+        </div>
+      `;
+    ]]]
+  battery: |
+    [[[
+      const s = states['sensor.myenergi_libbi_24049627_soc'];
+      const raw = s ? Number(s.state) : NaN;
+      const val = Number.isFinite(raw) ? Math.round(raw) : '–';
+
+      let colour = '#30c94a';
+      if (Number.isFinite(raw)) {
+        if (raw <= 20) colour = '#ff5c5c';
+        else if (raw <= 50) colour = '#ffd84d';
+        else if (raw >= 95) colour = '#60a5fa';
+      }
+
+      return `
+        <div style="text-align:center;min-width:0;overflow:hidden;">
+          <ha-icon icon="mdi:battery" style="width:22px;height:22px;color:${colour};"></ha-icon>
+          <div style="font-size:18px;font-weight:700;color:#ffffff;line-height:1.05;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:clip;">${val}%</div>
+          <div style="font-size:11px;color:#e5e7eb;line-height:1.1;">Battery</div>
+        </div>
+      `;
+    ]]]
+  grid: |
+    [[[
+      const s = states['sensor.myenergi_home_power_grid'];
+      const raw = s ? Number(s.state) : NaN;
+      const val = Number.isFinite(raw) ? Math.round(Math.abs(raw)) : '–';
+
+      let label = 'Grid';
+      let icon = 'mdi:transmission-tower';
+      let colour = '#d1d5db';
+
+      if (Number.isFinite(raw)) {
+        if (raw > 50) {
+          label = 'Import';
+          icon = 'mdi:transmission-tower-import';
+          colour = '#ffd84d';
+        } else if (raw < -50) {
+          label = 'Export';
+          icon = 'mdi:transmission-tower-export';
+          colour = '#60a5fa';
+        }
+      }
+
+      return `
+        <div style="text-align:center;min-width:0;overflow:hidden;">
+          <ha-icon icon="${icon}" style="width:22px;height:22px;color:${colour};"></ha-icon>
+          <div style="font-size:18px;font-weight:700;color:#ffffff;line-height:1.05;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:clip;">${val}W</div>
+          <div style="font-size:11px;color:#e5e7eb;line-height:1.1;">${label}</div>
+        </div>
+      `;
+    ]]]
+grid_options:
+  columns: full
+  rows: 1.5
