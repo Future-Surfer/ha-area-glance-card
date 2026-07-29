@@ -7,7 +7,9 @@ export default {
   output: {
     file: "area-glance-card.js",
     format: "es",
-    sourcemap: true,
+    // The distributed HACS asset is intentionally self-contained. Keeping a
+    // map out of the release avoids a broken source-map request in HA.
+    sourcemap: false,
   },
   plugins: [resolve(), typescript(), terser()],
 };

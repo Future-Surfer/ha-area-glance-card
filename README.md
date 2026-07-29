@@ -2,6 +2,8 @@
 
 Pick an area and Area Glance turns its scattered sensors and devices into one compact, live summary.
 
+## How to use
+
 ![Choose an area, get automatic area insights](docs/screenshots/area-to-insights.png)
 
 ## What it does

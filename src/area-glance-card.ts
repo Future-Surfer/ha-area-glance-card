@@ -529,7 +529,7 @@ window.customCards.push({
   name: "Area Glance Card",
   description: "A compact, preset-led summary for an area, home, or energy system.",
   preview: true,
-  documentationURL: "https://github.com/lewis/ha-area-glance-card",
+  documentationURL: "https://github.com/Future-Surfer/ha-area-glance-card",
 });
 
 declare global { interface Window { customCards: unknown[]; } }
