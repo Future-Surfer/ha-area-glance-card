@@ -118,11 +118,12 @@ export class AreaGlanceCard extends LitElement {
 
   private _areaMetric(metric: MetricConfig, preset: MetricPreset, label: string, icon: string): MetricDisplay {
     const area = metric.area ?? this._config?.area;
-    if (!area && this._config?.profile !== "house") return { icon, color: metric.color, value: "–", label };
+    const color = metric.color ?? PRESETS[preset].color;
+    if (!area && this._config?.profile !== "house") return { icon, color, value: "–", label };
     if (preset === "lights") {
       const lights = this._areaEntities(area, metric.domain ?? "light");
       const on = lights.filter((id) => this.hass?.states[id]?.state === "on").length;
-      return { icon, color: metric.color ?? "var(--warning-color, #e0af00)", value: `${on}/${lights.length}`, label, entities: lights, aggregate: true };
+      return { icon, color, value: `${on}/${lights.length}`, label, entities: lights, aggregate: true };
     }
     const matches = (entityId: string) => {
       const state = this.hass?.states[entityId];
@@ -134,7 +135,7 @@ export class AreaGlanceCard extends LitElement {
     };
     const values = this._areaEntities(area).map((entityId) => ({ entityId, state: this.hass?.states[entityId], value: asNumber(this.hass?.states[entityId]?.state ?? "") }))
       .filter((item) => matches(item.entityId) && item.value !== undefined && item.state && !UNAVAILABLE.has(item.state.state)) as { entityId: string; state: EntityState; value: number }[];
-    if (!values.length) return { icon, color: metric.color, value: "–", label };
+    if (!values.length) return { icon, color, value: "–", label };
 
     if (preset === "power") {
       const watts = values.reduce((total, item) => {
@@ -144,7 +145,7 @@ export class AreaGlanceCard extends LitElement {
       const useKilowatts = metric.unit === "kW" || (!metric.unit && Math.abs(watts) >= 1000);
       const displayed = useKilowatts ? watts / 1000 : watts;
       const decimals = metric.decimals ?? (useKilowatts ? 1 : 0);
-      return { icon, color: metric.color, value: `${displayed.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${metric.unit ?? (useKilowatts ? "kW" : "W")}`, label, entities: values.map((item) => item.entityId), aggregate: true };
+      return { icon, color, value: `${displayed.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${metric.unit ?? (useKilowatts ? "kW" : "W")}`, label, entities: values.map((item) => item.entityId), aggregate: true };
     }
 
     const sorted = values.map((item) => item.value).sort((left, right) => left - right);
@@ -154,7 +155,7 @@ export class AreaGlanceCard extends LitElement {
     const decimals = metric.decimals ?? 0;
     const inferredUnit = String(values[0].state.attributes.unit_of_measurement ?? "");
     const unit = metric.unit ?? (format === "temperature" ? "°" : format === "percent" ? "%" : inferredUnit);
-    return { icon, color: metric.color, value: `${number.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit}`, label, entities: values.map((item) => item.entityId), aggregate: true };
+    return { icon, color, value: `${number.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit}`, label, entities: values.map((item) => item.entityId), aggregate: true };
   }
 
   private _metric(metric: MetricConfig): MetricDisplay | undefined {
@@ -167,7 +168,7 @@ export class AreaGlanceCard extends LitElement {
     const icon = metric.icon ?? defaults.icon;
 
     if (this._metricSource(metric, preset) === "area") return this._areaMetric(metric, preset, label, icon);
-    if (!state || UNAVAILABLE.has(state.state)) return { icon, color: metric.color, value: "–", label };
+    if (!state || UNAVAILABLE.has(state.state)) return { icon, color: metric.color ?? defaults.color, value: "–", label };
 
     const number = asNumber(state.state);
     const format = metric.format ?? defaults.format;
@@ -181,8 +182,8 @@ export class AreaGlanceCard extends LitElement {
     } else {
       value = this.hass?.formatEntityState?.(state) ?? friendlyState(state.state);
     }
-    let color = metric.color;
-    if (!color && preset === "battery" && number !== undefined) {
+    let color = metric.color ?? defaults.color;
+    if (!metric.color && preset === "battery" && number !== undefined) {
       color = number <= 20 ? "var(--error-color, #db4437)" : number <= 50 ? "var(--warning-color, #e0af00)" : "var(--info-color, #3f8cff)";
     }
     return { icon, color, value, label };
