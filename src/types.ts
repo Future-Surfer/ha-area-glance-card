@@ -5,6 +5,9 @@ export type MetricPreset =
   | "power"
   | "battery"
   | "co2"
+  | "pm25"
+  | "voc"
+  | "aqi"
   | "motion"
   | "presence"
   | "doors"
@@ -56,6 +59,14 @@ export interface MetricConfig extends ActionConfig {
   preset?: MetricPreset;
   source?: "area" | "entity";
   entity?: string;
+  /** Optional second line for a custom-combination insight. */
+  secondary_entity?: string;
+  secondary_text?: string;
+  /** Optional entity whose icon is used by a custom-combination insight. */
+  icon_entity?: string;
+  /** Optional entity whose state selects a custom-combination colour rule. */
+  color_entity?: string;
+  color_rules?: { state: string; color: string }[];
   area?: string;
   domain?: string;
   label?: string;

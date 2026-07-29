@@ -5,7 +5,8 @@ import type { ActionConfig, AreaGlanceConfig, AreaSignal, EntityState, HassLike,
 const UNAVAILABLE = new Set(["unknown", "unavailable", "none", ""]);
 const DEFAULT_METRICS = [presetMetric("temperature"), presetMetric("lights"), presetMetric("power"), presetMetric("device")];
 const AREA_SIGNAL_PRESETS = new Set<MetricPreset>(["motion", "presence", "doors", "windows", "leaks"]);
-const AUTOMATIC_METRIC_PRESETS: MetricPreset[] = ["temperature", "humidity", "lights", "power", "co2", "motion", "presence", "doors", "windows", "leaks"];
+const AREA_MEASUREMENT_PRESETS = new Set<MetricPreset>(["temperature", "humidity", "power", "co2", "pm25", "voc", "aqi"]);
+const AUTOMATIC_METRIC_PRESETS: MetricPreset[] = ["temperature", "humidity", "lights", "power", "co2", "pm25", "voc", "aqi", "motion", "presence", "doors", "windows", "leaks"];
 const DEVICE_METRIC_PRESETS: MetricPreset[] = ["people_home", "battery", "device", "custom"];
 const AREA_STATUS_SOURCES: Record<AreaSignal, StatusConfig["source"]> = {
   motion: "area_motion",
@@ -28,7 +29,10 @@ const SLOT_HELPERS: Record<MetricPreset, string> = {
   lights: "Count lights that are on in an area.",
   power: "Sum compatible live power sensors in an area, or use one sensor.",
   battery: "Show a battery percentage with sensible colour thresholds.",
-  co2: "Show a CO₂ reading from one entity.",
+  co2: "Show the highest compatible CO₂ measurement in this area.",
+  pm25: "Show the highest compatible PM2.5 measurement in this area.",
+  voc: "Show a compatible volatile-organic-compounds measurement in this area.",
+  aqi: "Show the highest compatible Air Quality Index in this area.",
   motion: "Show whether there is motion now, or when motion was last seen in this area.",
   presence: "Show whether any area presence sensor reports the room as occupied.",
   doors: "Count compatible area doors and garage doors that are open.",
@@ -55,6 +59,32 @@ const APPEARANCE_PRESETS = {
 const asNumber = (value: string): number | undefined => {
   const number = Number(value);
   return Number.isFinite(number) ? number : undefined;
+};
+
+const normalisedUnit = (state?: EntityState): string => String(state?.attributes.unit_of_measurement ?? "")
+  .trim()
+  .toLowerCase()
+  .replaceAll("μ", "µ")
+  .replaceAll("³", "3");
+
+const isMeasurementSensor = (entityId: string, state?: EntityState): boolean =>
+  entityId.startsWith("sensor.") && asNumber(state?.state ?? "") !== undefined;
+
+const isAreaMeasurement = (preset: MetricPreset, entityId: string, state?: EntityState): boolean => {
+  if (!isMeasurementSensor(entityId, state)) return false;
+  const deviceClass = String(state?.attributes.device_class ?? "");
+  const unit = normalisedUnit(state);
+  const rawUnit = String(state?.attributes.unit_of_measurement ?? "");
+  if (preset === "temperature") return deviceClass === "temperature";
+  if (preset === "humidity") return deviceClass === "humidity";
+  if (preset === "power") return ["W", "kW", "MW"].includes(rawUnit);
+  if (preset === "co2") return (deviceClass === "carbon_dioxide" && unit === "ppm")
+    || (!deviceClass && unit === "ppm" && /(^|_)(co2|carbon_dioxide)(_|$)/.test(entityId));
+  if (preset === "pm25") return deviceClass === "pm25" && unit === "µg/m3";
+  if (preset === "voc") return (deviceClass === "volatile_organic_compounds" && ["µg/m3", "mg/m3"].includes(unit))
+    || (deviceClass === "volatile_organic_compounds_parts" && ["ppm", "ppb"].includes(unit));
+  if (preset === "aqi") return deviceClass === "aqi" && !unit;
+  return false;
 };
 
 const friendlyState = (state: string) => state.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
@@ -186,7 +216,7 @@ export class AreaGlanceCard extends LitElement {
 
   private _metricSource(metric: MetricConfig, preset: MetricPreset): "area" | "entity" {
     if (preset === "lights" || AREA_SIGNAL_PRESETS.has(preset)) return "area";
-    return metric.source ?? (metric.entity ? "entity" : ["temperature", "humidity", "power", "co2"].includes(preset) ? "area" : "entity");
+    return metric.source ?? (metric.entity ? "entity" : AREA_MEASUREMENT_PRESETS.has(preset) ? "area" : "entity");
   }
 
   private _areaSignalSummary(area: string | undefined, signal: AreaSignal): AreaSignalSummary {
@@ -227,16 +257,8 @@ export class AreaGlanceCard extends LitElement {
       const on = lights.filter((id) => this.hass?.states[id]?.state === "on").length;
       return { icon, color, value: `${on}/${lights.length}`, label, entities: lights, aggregate: true };
     }
-    const matches = (entityId: string) => {
-      const state = this.hass?.states[entityId];
-      const deviceClass = state?.attributes.device_class;
-      if (preset === "temperature") return deviceClass === "temperature";
-      if (preset === "humidity") return deviceClass === "humidity";
-      if (preset === "power") return (deviceClass === "power" || ["W", "kW", "MW"].includes(String(state?.attributes.unit_of_measurement ?? ""))) && ["W", "kW", "MW"].includes(String(state?.attributes.unit_of_measurement ?? ""));
-      return deviceClass === "carbon_dioxide" || /(^|_)(co2|carbon_dioxide)(_|$)/.test(entityId);
-    };
     const values = this._areaEntities(area).map((entityId) => ({ entityId, state: this.hass?.states[entityId], value: asNumber(this.hass?.states[entityId]?.state ?? "") }))
-      .filter((item) => matches(item.entityId) && item.value !== undefined && item.state && !UNAVAILABLE.has(item.state.state)) as { entityId: string; state: EntityState; value: number }[];
+      .filter((item) => isAreaMeasurement(preset, item.entityId, item.state) && item.value !== undefined && item.state && !UNAVAILABLE.has(item.state.state)) as { entityId: string; state: EntityState; value: number }[];
     if (!values.length) return { icon, color, value: "–", label };
 
     if (preset === "power") {
@@ -250,14 +272,43 @@ export class AreaGlanceCard extends LitElement {
       return { icon, color, value: `${displayed.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${metric.unit ?? (useKilowatts ? "kW" : "W")}`, label, entities: values.map((item) => item.entityId), aggregate: true };
     }
 
-    const sorted = values.map((item) => item.value).sort((left, right) => left - right);
+    const compatibleValues = preset === "voc"
+      ? Object.values(values.reduce<Record<string, typeof values>>((groups, item) => {
+        const key = `${item.state.attributes.device_class ?? ""}|${normalisedUnit(item.state)}`;
+        (groups[key] ??= []).push(item);
+        return groups;
+      }, {})).sort((left, right) => right.length - left.length)[0] ?? values
+      : values;
+    const sorted = compatibleValues.map((item) => item.value).sort((left, right) => left - right);
     const middle = Math.floor(sorted.length / 2);
-    const number = preset === "co2" ? sorted.at(-1)! : sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+    const number = ["co2", "pm25", "voc", "aqi"].includes(preset) ? sorted.at(-1)! : sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
     const format = metric.format ?? PRESETS[preset].format;
     const decimals = metric.decimals ?? 0;
-    const inferredUnit = String(values[0].state.attributes.unit_of_measurement ?? "");
+    const inferredUnit = String(compatibleValues[0].state.attributes.unit_of_measurement ?? "");
     const unit = metric.unit ?? (format === "temperature" ? "°" : format === "percent" ? "%" : inferredUnit);
-    return { icon, color, value: `${number.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit}`, label, entities: values.map((item) => item.entityId), aggregate: true };
+    return { icon, color, value: `${number.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit}`, label, entities: compatibleValues.map((item) => item.entityId), aggregate: true };
+  }
+
+  private _entityDisplayValue(entityId?: string): string | undefined {
+    const state = entityId ? this.hass?.states[entityId] : undefined;
+    if (!state || UNAVAILABLE.has(state.state)) return undefined;
+    const number = asNumber(state.state);
+    if (number === undefined) return this.hass?.formatEntityState?.(state) ?? friendlyState(state.state);
+    const unit = typeof state.attributes.unit_of_measurement === "string" ? state.attributes.unit_of_measurement : "";
+    return `${number.toLocaleString(undefined, { maximumFractionDigits: 2 })}${unit}`;
+  }
+
+  private _customSupportingText(metric: MetricConfig, fallbackLabel: string): string {
+    return this._entityDisplayValue(metric.secondary_entity)
+      ?? metric.secondary_text
+      ?? (metric.label && metric.label !== PRESETS.custom.label ? metric.label : fallbackLabel);
+  }
+
+  private _customColor(metric: MetricConfig, state: EntityState, fallback: string): string {
+    const colorState = metric.color_entity ? this.hass?.states[metric.color_entity] : state;
+    const stateValue = colorState?.state.trim().toLowerCase();
+    const rule = metric.color_rules?.find((candidate) => candidate.state.trim().toLowerCase() === stateValue && candidate.color.trim());
+    return rule?.color.trim() || fallback;
   }
 
   private _metric(metric: MetricConfig): MetricDisplay | undefined {
@@ -275,12 +326,17 @@ export class AreaGlanceCard extends LitElement {
     const label = preset === "device" && (!metric.label || metric.label === defaults.label)
       ? devicePresentation?.label ?? defaults.label
       : metric.label ?? defaults.label;
-    const icon = preset === "device" && (!metric.icon || metric.icon === defaults.icon)
+    const configuredIcon = preset === "device" && (!metric.icon || metric.icon === defaults.icon)
       ? devicePresentation?.icon ?? String(state?.attributes.icon ?? defaults.icon)
       : metric.icon ?? defaults.icon;
+    const iconState = metric.icon_entity ? this.hass?.states[metric.icon_entity] : undefined;
+    const icon = preset === "custom" && typeof iconState?.attributes.icon === "string"
+      ? iconState.attributes.icon
+      : configuredIcon;
+    const customLabel = preset === "custom" ? this._customSupportingText(metric, label) : label;
 
     if (this._metricSource(metric, preset) === "area") return this._areaMetric(metric, preset, label, icon);
-    if (!state || UNAVAILABLE.has(state.state)) return { icon, color: metric.color ?? defaults.color, value: "–", label };
+    if (!state || UNAVAILABLE.has(state.state)) return { icon, color: metric.color ?? defaults.color, value: "–", label: customLabel };
 
     const number = asNumber(state.state);
     const format = metric.format ?? defaults.format;
@@ -300,7 +356,8 @@ export class AreaGlanceCard extends LitElement {
     if (!metric.color && preset === "battery" && number !== undefined) {
       color = number <= 20 ? "var(--error-color, #db4437)" : number <= 50 ? "var(--warning-color, #e0af00)" : "var(--info-color, #3f8cff)";
     }
-    return { icon, color, value, label };
+    if (preset === "custom") color = this._customColor(metric, state, color);
+    return { icon, color, value, label: customLabel };
   }
 
   private _status() {
@@ -500,7 +557,7 @@ export class AreaGlanceCard extends LitElement {
     ha-card { overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 8%, transparent); border-radius:var(--area-glance-card-border-radius, 24px); cursor:default; background:var(--area-glance-card-background, var(--ha-card-background, var(--card-background-color))); box-shadow:var(--ha-card-box-shadow, 0 8px 24px rgb(0 0 0 / 18%)); }
     ha-card.clickable { cursor:pointer; }
     ha-card.no-shadow { box-shadow:none; }
-    .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:205px minmax(0, 1fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
+    .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:clamp(126px, 27%, 185px) minmax(0, 1fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
     .layout.metrics-only { grid-template-columns:minmax(0, 1fr); }
     .layout.stacked { grid-template-columns:minmax(0, 1fr); grid-template-rows:auto minmax(var(--area-glance-metrics-height, 62px), 1fr); gap:8px; }
     .layout.stacked .summary { padding:3px 4px 0; }
@@ -536,7 +593,7 @@ export class AreaGlanceCard extends LitElement {
     .detail-entity strong, .detail-entity small { display:block; }
     .detail-entity small { margin-top:2px; color:var(--secondary-text-color); font-size:.75rem; }
     .detail-state { color:var(--secondary-text-color); white-space:nowrap; font-size:.86rem; }
-    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:118px minmax(0, 1fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.35rem); } .status { font-size:min(var(--area-glance-status-size, .85rem), .76rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 20px); height:min(var(--area-glance-icon-size, 24px), 20px); margin-bottom:1px; } .value { font-size:min(var(--area-glance-value-size, 1.6rem), .88rem); } .label { font-size:min(var(--area-glance-label-size, .82rem), .58rem); margin-top:1px; } }
+    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:clamp(100px, 31%, 126px) minmax(0, 1fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.35rem); } .status { font-size:min(var(--area-glance-status-size, .85rem), .76rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 20px); height:min(var(--area-glance-icon-size, 24px), 20px); margin-bottom:1px; } .value { font-size:min(var(--area-glance-value-size, 1.6rem), .88rem); } .label { font-size:min(var(--area-glance-label-size, .82rem), .58rem); margin-top:1px; } }
   `;
 }
 
@@ -646,14 +703,18 @@ export class AreaGlanceCardEditor extends LitElement {
     const profile = this._inferredProfile(area, requestedProfile);
     const state = (entityId: string) => this.hass?.states[entityId];
     const first = (predicate: (entityId: string) => boolean) => entities.find(predicate);
-    const hasDeviceClass = (entityId: string, deviceClass: string) => state(entityId)?.attributes.device_class === deviceClass;
-    const isPower = (entityId: string) => hasDeviceClass(entityId, "power") || ["W", "kW", "MW"].includes(String(state(entityId)?.attributes.unit_of_measurement ?? ""));
+    const hasDeviceClass = (entityId: string, deviceClass: string) => isMeasurementSensor(entityId, state(entityId)) && state(entityId)?.attributes.device_class === deviceClass;
+    const isPower = (entityId: string) => isAreaMeasurement("power", entityId, state(entityId));
     const metrics: MetricConfig[] = [];
     const addEntityMetric = (preset: MetricPreset, entity?: string, overrides: Partial<MetricConfig> = {}) => { if (entity && metrics.length < 5) metrics.push({ ...presetMetric(preset), entity, source: "entity", ...overrides }); };
     const addAreaMetric = (preset: MetricPreset, available: boolean, overrides: Partial<MetricConfig> = {}) => { if (available && metrics.length < 5) metrics.push({ ...presetMetric(preset), source: "area", ...(area ? { area } : {}), ...overrides }); };
     const temperature = first((id) => hasDeviceClass(id, "temperature"));
     const humidity = first((id) => hasDeviceClass(id, "humidity"));
-    const co2 = first((id) => hasDeviceClass(id, "carbon_dioxide") || /(^|_)(co2|carbon_dioxide)(_|$)/.test(id));
+    const co2 = first((id) => isAreaMeasurement("co2", id, state(id)));
+    const pm25 = first((id) => isAreaMeasurement("pm25", id, state(id)));
+    const voc = first((id) => isAreaMeasurement("voc", id, state(id)));
+    const aqi = first((id) => isAreaMeasurement("aqi", id, state(id)));
+    const airQualityPreset = ([ ["co2", co2], ["pm25", pm25], ["voc", voc], ["aqi", aqi] ] as const).find(([, entity]) => Boolean(entity))?.[0];
     const power = first(isPower);
     const battery = first((id) => hasDeviceClass(id, "battery"));
     const homeZone = state("zone.home") && asNumber(state("zone.home")?.state ?? "") !== undefined ? "zone.home" : undefined;
@@ -679,7 +740,7 @@ export class AreaGlanceCardEditor extends LitElement {
       addAreaMetric("lights", Boolean(first((id) => id.startsWith("light."))));
       addEntityMetric("device", media ?? device, { label: media ? "Media" : undefined });
       addAreaMetric("power", Boolean(power));
-      addAreaMetric("co2", Boolean(co2));
+      if (airQualityPreset) addAreaMetric(airQualityPreset, true);
       addAreaMetric("humidity", Boolean(humidity));
     } else if (profile === "house") {
       const outsideTemperature = first((id) => hasDeviceClass(id, "temperature") && /(outside|outdoor|exterior)/.test(id));
@@ -693,7 +754,7 @@ export class AreaGlanceCardEditor extends LitElement {
       addAreaMetric("temperature", Boolean(temperature));
       addAreaMetric("lights", Boolean(first((id) => id.startsWith("light."))));
       addAreaMetric("humidity", Boolean(humidity));
-      addAreaMetric("co2", Boolean(co2));
+      if (airQualityPreset) addAreaMetric(airQualityPreset, true);
       addAreaMetric("power", Boolean(power));
       if (profile === "room") addEntityMetric("device", device);
     }
@@ -727,6 +788,11 @@ export class AreaGlanceCardEditor extends LitElement {
     const metrics = [...(this._config.metrics ?? [])];
     const updated = { ...metrics[index], ...change };
     if (change.preset && change.preset !== metrics[index].preset) {
+      delete updated.secondary_entity;
+      delete updated.secondary_text;
+      delete updated.icon_entity;
+      delete updated.color_entity;
+      delete updated.color_rules;
       Object.assign(updated, presetMetric(change.preset));
       if (AUTOMATIC_METRIC_PRESETS.includes(change.preset)) updated.entity = undefined;
       else {
@@ -735,6 +801,23 @@ export class AreaGlanceCardEditor extends LitElement {
       }
     }
     metrics[index] = updated;
+    this._change({ metrics });
+  }
+  private _updateColorRule(index: number, ruleIndex: number, change: Partial<NonNullable<MetricConfig["color_rules"]>[number]>) {
+    const metrics = [...(this._config.metrics ?? [])];
+    const rules = [...(metrics[index].color_rules ?? [])];
+    rules[ruleIndex] = { ...rules[ruleIndex], ...change };
+    metrics[index] = { ...metrics[index], color_rules: rules };
+    this._change({ metrics });
+  }
+  private _addColorRule(index: number) {
+    const metrics = [...(this._config.metrics ?? [])];
+    metrics[index] = { ...metrics[index], color_rules: [...(metrics[index].color_rules ?? []), { state: "", color: "" }] };
+    this._change({ metrics });
+  }
+  private _removeColorRule(index: number, ruleIndex: number) {
+    const metrics = [...(this._config.metrics ?? [])];
+    metrics[index] = { ...metrics[index], color_rules: (metrics[index].color_rules ?? []).filter((_, currentIndex) => currentIndex !== ruleIndex) };
     this._change({ metrics });
   }
   private _removeMetric(index: number) { this._change({ metrics: (this._config.metrics ?? []).filter((_, metricIndex) => metricIndex !== index) }); }
@@ -764,7 +847,7 @@ export class AreaGlanceCardEditor extends LitElement {
       <section class="insights"><h3>Insights</h3><p class="hint">Keep up to five. They resize automatically to fit the card.</p>
       ${metrics.map((metric, index) => {
         const preset = metric.preset ?? "custom";
-        const supportsArea = ["temperature", "humidity", "power", "co2"].includes(preset);
+        const supportsArea = AREA_MEASUREMENT_PRESETS.has(preset);
         const usesArea = preset === "lights" || AREA_SIGNAL_PRESETS.has(preset) || (supportsArea && (metric.source ?? (metric.entity ? "entity" : "area")) === "area");
         const source = metric.source ?? (metric.entity ? "entity" : "area");
         const sourceLabel = usesArea ? (preset === "lights" ? "Area count" : "Area aggregate") : preset === "people_home" ? "Home zone" : "Specific entity";
@@ -784,10 +867,20 @@ export class AreaGlanceCardEditor extends LitElement {
             <option value="entity">A specific entity</option>
           </select>
         </label>` : nothing}
-        ${usesArea ? html`<ha-area-picker .hass=${this.hass} .value=${metric.area ?? this._config.area ?? ""} .label=${preset === "lights" ? "Area to count" : "Area to summarise"} @value-changed=${(e: Event) => this._updateMetric(index, { source: "area", area: this._pickerValue(e) })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${preset === "device" || preset === "custom" ? "Device or entity" : `${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>`}
+        ${usesArea ? html`<ha-area-picker .hass=${this.hass} .value=${metric.area ?? this._config.area ?? ""} .label=${preset === "lights" ? "Area to count" : "Area to summarise"} @value-changed=${(e: Event) => this._updateMetric(index, { source: "area", area: this._pickerValue(e) })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${preset === "custom" ? "Main text entity" : preset === "device" ? "Device or entity" : `${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>`}
+        ${preset === "custom" ? html`
+          <p class="slot-hint">Use one entity for the main state and another for the smaller supporting value beneath it.</p>
+          <ha-entity-picker .hass=${this.hass} .value=${metric.secondary_entity ?? ""} label="Supporting value entity (optional)" allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { secondary_entity: this._pickerValue(e) || undefined })}></ha-entity-picker>
+          <ha-entity-picker .hass=${this.hass} .value=${metric.icon_entity ?? ""} label="Use icon from entity (optional)" allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { icon_entity: this._pickerValue(e) || undefined })}></ha-entity-picker>
+          <ha-entity-picker .hass=${this.hass} .value=${metric.color_entity ?? ""} label="Colour state entity (optional)" allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { color_entity: this._pickerValue(e) || undefined })}></ha-entity-picker>
+          <div class="custom-rules"><span class="section-label">Icon colour rules</span><p class="slot-hint">Match the state of the colour entity, or the main entity when left blank.</p>
+            ${(metric.color_rules ?? []).map((rule, ruleIndex) => html`<div class="color-rule"><label>State <input .value=${rule.state} placeholder="Good" @input=${(e: Event) => this._updateColorRule(index, ruleIndex, { state: (e.target as HTMLInputElement).value })}></label><label>Colour <input .value=${rule.color} placeholder="var(--green-color)" @input=${(e: Event) => this._updateColorRule(index, ruleIndex, { color: (e.target as HTMLInputElement).value })}></label><button class="remove-rule" @click=${() => this._removeColorRule(index, ruleIndex)}>Remove</button></div>`) }
+            <button class="add-rule" @click=${() => this._addColorRule(index)}>Add colour rule</button>
+          </div>
+        ` : nothing}
         <details class="more-options"><summary>More options</summary>
-          <div class="two"><label>Label <input .value=${metric.label ?? ""} @input=${(e: Event) => this._updateMetric(index, { label: (e.target as HTMLInputElement).value })}></label><ha-icon-picker label="Icon" .value=${metric.icon ?? ""} .placeholder=${PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon: this._pickerValue(e) })}></ha-icon-picker></div>
-          <div class="two"><label>Colour <input .value=${metric.color ?? ""} placeholder="var(--primary-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value })}></label><label>Unit override <input .value=${metric.unit ?? ""} @input=${(e: Event) => this._updateMetric(index, { unit: (e.target as HTMLInputElement).value })}></label></div>
+          <div class="two"><label>${preset === "custom" ? "Supporting text fallback" : "Label"} <input .value=${preset === "custom" ? metric.secondary_text ?? "" : metric.label ?? ""} @input=${(e: Event) => this._updateMetric(index, preset === "custom" ? { secondary_text: (e.target as HTMLInputElement).value || undefined } : { label: (e.target as HTMLInputElement).value })}></label><ha-icon-picker label="Icon" .value=${metric.icon ?? ""} .placeholder=${PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon: this._pickerValue(e) })}></ha-icon-picker></div>
+          <div class="two"><label>${preset === "custom" ? "Fallback colour" : "Colour"} <input .value=${metric.color ?? ""} placeholder="var(--primary-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value || undefined })}></label><label>Unit override <input .value=${metric.unit ?? ""} @input=${(e: Event) => this._updateMetric(index, { unit: (e.target as HTMLInputElement).value || undefined })}></label></div>
         </details>
         <div class="insight-actions"><label class="checkbox"><input type="checkbox" .checked=${metric.hidden ?? false} @change=${this._metricBoolean(index, "hidden")}> Hide</label><button class="remove" @click=${() => this._removeMetric(index)}>Remove</button></div></div>
       </details>`})}
@@ -824,6 +917,13 @@ export class AreaGlanceCardEditor extends LitElement {
   }
   static styles = css`
     :host { display:block; } .editor { padding:12px; } h3 { margin:0; } .hint, .slot-hint { color:var(--secondary-text-color); margin:4px 0 12px; } .slot-hint { font-size:.88rem; } label { display:block; font-weight:500; margin:12px 0; } ha-entity-picker, ha-area-picker { display:block; margin:12px 0; } input, select { box-sizing:border-box; width:100%; padding:8px; margin-top:4px; font:inherit; color:inherit; background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:6px; } button { cursor:pointer; font:inherit; } .setup, .insights { margin-top:18px; } .section-label { display:block; font-weight:600; margin-bottom:8px; } .purpose-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; } .purpose { text-align:left; min-height:62px; padding:10px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; } .purpose.selected { border:2px solid var(--primary-color); background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .purpose strong, .purpose small { display:block; } .purpose small { color:var(--secondary-text-color); font-size:.78rem; margin-top:3px; } .applied { color:var(--secondary-text-color); font-size:.9rem; margin:8px 0; } .suggestion-update { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:10px; margin-top:8px; border-radius:8px; background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .suggestion-update span { font-size:.88rem; } .primary, .add { padding:8px 12px; color:white; background:var(--primary-color); border:0; border-radius:6px; white-space:nowrap; } .advanced-setup, .settings, .insight-editor { border:1px solid var(--divider-color); border-radius:8px; padding:10px; margin-top:12px; } summary { cursor:pointer; font-weight:600; } .advanced-setup summary, .settings summary, .more-options summary { color:var(--secondary-text-color); } .insight-editor { padding:0; overflow:hidden; } .insight-editor > summary { display:flex; align-items:center; gap:8px; padding:12px; list-style:none; } .insight-editor > summary::-webkit-details-marker { display:none; } .insight-editor > summary::after { content:"›"; margin-left:auto; color:var(--secondary-text-color); font-size:1.4rem; } .insight-editor[open] > summary::after { transform:rotate(90deg); } .insight-editor ha-icon { width:22px; height:22px; color:var(--primary-color); } .insight-name { min-width:0; flex:1; } .source-pill { padding:3px 6px; border-radius:999px; color:var(--secondary-text-color); background:color-mix(in srgb, var(--secondary-text-color) 12%, transparent); font-size:.72rem; white-space:nowrap; } .insight-fields { padding:0 12px 12px; border-top:1px solid var(--divider-color); } .more-options { margin-top:12px; } .two { display:grid; grid-template-columns:1fr 1fr; gap:8px; } .checkbox { font-weight:400; } .checkbox input { width:auto; margin:0 6px 0 0; vertical-align:middle; } .insight-actions { display:flex; align-items:center; justify-content:space-between; } .remove { padding:6px 0; color:var(--error-color); background:transparent; border:0; } .add { margin-top:12px; } @media (max-width:400px) { .purpose-grid, .two { grid-template-columns:1fr; } .suggestion-update { align-items:flex-start; flex-direction:column; } }
+    .custom-rules { margin:14px 0; padding:10px; border:1px solid var(--divider-color); border-radius:8px; }
+    .custom-rules .slot-hint { margin-bottom:8px; }
+    .color-rule { display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1fr) auto; gap:8px; align-items:end; margin-top:8px; }
+    .color-rule label { margin:0; }
+    .remove-rule, .add-rule { padding:8px 10px; border:1px solid var(--divider-color); border-radius:6px; background:transparent; color:var(--primary-text-color); }
+    .remove-rule { color:var(--error-color); }
+    .add-rule { margin-top:10px; }
     ha-icon-picker { display:block; margin:12px 0; }
     .two ha-icon-picker { align-self:end; }
   `;
