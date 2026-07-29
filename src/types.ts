@@ -34,16 +34,15 @@ export interface HassLike {
 }
 
 export interface ActionConfig {
-  action?: "more-info" | "navigate" | "toggle" | "call-service" | "area-details" | "none";
+  action?: "more-info" | "navigate" | "toggle" | "call-service" | "area-details" | "status-details" | "none";
   entity?: string;
   navigation_path?: string;
   service?: string;
   data?: Record<string, unknown>;
 }
 
-export interface StatusConfig {
+export interface StatusConfig extends ActionConfig {
   source?: "area_motion" | "area_presence" | "area_doors" | "area_windows" | "area_leaks" | "entity";
-  entity?: string;
   area?: string;
   active_text?: string;
   inactive_text?: string;

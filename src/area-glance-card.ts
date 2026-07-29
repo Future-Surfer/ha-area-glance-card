@@ -89,8 +89,6 @@ const isDoorEntity = (entityId: string, state?: EntityState): boolean => {
 const isDoorOpen = (entityId: string, state: EntityState): boolean =>
   entityId.startsWith("cover.") ? ["open", "opening"].includes(state.state) : state.state === "on";
 
-const shortDoorName = (name: string): string => name.replace(/\s+(door|contact|sensor|opening)$/i, "");
-
 const isWindowEntity = (entityId: string, state?: EntityState): boolean => {
   const deviceClass = String(state?.attributes.device_class ?? "");
   if (entityId.startsWith("binary_sensor.")) return deviceClass === "window";
@@ -328,8 +326,7 @@ export class AreaGlanceCard extends LitElement {
       if (!summary.entities.length) return { line: "", age: "", color: "var(--disabled-text-color)" };
       const color = summary.active.length ? (config.active_color ?? "var(--warning-color, #e0af00)") : (config.inactive_color ?? "var(--success-color, #2eaa45)");
       if (!summary.active.length) return { line: config.inactive_text ?? "All doors", age: "closed", color };
-      if (summary.active.length === 1) return { line: this._entityName(summary.active[0].entityId), age: "open", color };
-      return { line: `${summary.active.length} doors open`, age: summary.active.map((door) => shortDoorName(this._entityName(door.entityId))).join(", "), color };
+      return { line: `${summary.active.length} door${summary.active.length === 1 ? "" : "s"} open`, age: "", color };
     }
     if (signal === "presence") {
       const summary = this._areaSignalSummary(config.area ?? this._config?.area, signal);
@@ -412,6 +409,20 @@ export class AreaGlanceCard extends LitElement {
     };
   }
 
+  private _openStatusDetails() {
+    const status = this._config?.status;
+    const signal = statusSignal(status?.source);
+    if (!status || !signal) return;
+    const area = status.area ?? this._config?.area;
+    const labels: Record<AreaSignal, string> = { motion: "Motion", presence: "Presence", doors: "Doors", windows: "Windows", leaks: "Water leaks" };
+    this._detail = {
+      title: labels[signal],
+      subtitle: area ? `Included from ${this._areaName(area) ?? "this area"}` : "Included entities",
+      entities: this._areaSignalSummary(area, signal).entities.map((entry) => entry.entityId),
+      emptyMessage: "No compatible entities are currently contributing to this status.",
+    };
+  }
+
   private _metricClicked(metric: MetricConfig, display: MetricDisplay, event: Event) {
     event.stopPropagation();
     const preset = metric.preset ?? "custom";
@@ -427,6 +438,16 @@ export class AreaGlanceCard extends LitElement {
   }
 
   private _headerClicked() { this._runAction(this._config?.header_action ?? this._config); }
+  private _statusClicked(event: Event) {
+    event.stopPropagation();
+    const status = this._config?.status;
+    if (!status || !status.action || status.action === "none") return;
+    if (status.action === "status-details") {
+      this._openStatusDetails();
+      return;
+    }
+    this._runAction(status, status.entity);
+  }
   private _closeDetail() { this._detail = undefined; }
 
   protected updated(changed: PropertyValues<this>) {
@@ -447,12 +468,13 @@ export class AreaGlanceCard extends LitElement {
     const noShadow = appearance?.shadow === false;
     const headerAction = this._config.header_action ?? this._config;
     const headerClickable = Boolean(headerAction.action && headerAction.action !== "none");
+    const statusClickable = Boolean(this._config.status?.action && this._config.status.action !== "none");
     return html`
       <ha-card class=${`${this._config.theme === "dark" ? "force-dark" : this._config.theme === "light" ? "force-light" : ""}${noShadow ? " no-shadow" : ""}${headerClickable ? " clickable" : ""}`} style=${`--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);${background ? `--area-glance-card-background:${background}` : ""}`} @click=${this._headerClicked}>
         <section class=${showHeader ? `layout${this._config.layout === "stacked" ? " stacked" : ""}` : "layout metrics-only"} style=${this._layoutStyle()}>
           ${showHeader ? html`<div class="summary">
               <div class="title">${title}</div>
-              ${status.line ? html`<div class="status"><span class="dot" style=${`background:${status.color}`}></span><span><span>${status.line}</span>${status.age ? html`<small>${status.age}</small>` : nothing}</span></div>` : nothing}
+              ${status.line ? html`<button class=${`status${statusClickable ? " clickable" : ""}`} ?disabled=${!statusClickable} @click=${this._statusClicked}><span class="dot" style=${`background:${status.color}`}></span><span><span>${status.line}</span>${status.age ? html`<small>${status.age}</small>` : nothing}</span></button>` : nothing}
             </div>` : nothing}
           <div class="metrics" style=${`--metric-count:${Math.max(metrics.length, 1)}`}>
             ${metrics.map(({ metric, display }) => html`
@@ -478,7 +500,7 @@ export class AreaGlanceCard extends LitElement {
     ha-card { overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 8%, transparent); border-radius:var(--area-glance-card-border-radius, 24px); cursor:default; background:var(--area-glance-card-background, var(--ha-card-background, var(--card-background-color))); box-shadow:var(--ha-card-box-shadow, 0 8px 24px rgb(0 0 0 / 18%)); }
     ha-card.clickable { cursor:pointer; }
     ha-card.no-shadow { box-shadow:none; }
-    .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:minmax(126px, 1.65fr) minmax(0, 4fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
+    .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:205px minmax(0, 1fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
     .layout.metrics-only { grid-template-columns:minmax(0, 1fr); }
     .layout.stacked { grid-template-columns:minmax(0, 1fr); grid-template-rows:auto minmax(var(--area-glance-metrics-height, 62px), 1fr); gap:8px; }
     .layout.stacked .summary { padding:3px 4px 0; }
@@ -486,7 +508,10 @@ export class AreaGlanceCard extends LitElement {
     .layout.stacked .metric:first-child { border-left:0; }
     .summary { min-width:0; align-self:center; padding:3px 8px 3px 4px; }
     .title { color:var(--primary-text-color); font-size:var(--area-glance-title-size, 1.8rem); font-weight:720; letter-spacing:-.03em; line-height:1.12; padding-block:.03em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .status { color:var(--secondary-text-color); display:flex; gap:6px; align-items:flex-start; margin-top:5px; font-size:var(--area-glance-status-size, .85rem); line-height:1.15; min-width:0; }
+    .status { appearance:none; width:100%; padding:0; border:0; color:var(--secondary-text-color); background:transparent; display:flex; gap:6px; align-items:flex-start; margin-top:5px; font:inherit; font-size:var(--area-glance-status-size, .85rem); line-height:1.15; min-width:0; text-align:left; }
+    .status.clickable { cursor:pointer; border-radius:6px; }
+    .status.clickable:hover { background:color-mix(in srgb, var(--area-glance-accent) 8%, transparent); }
+    .status:disabled { opacity:1; }
     .status > span:last-child { min-width:0; overflow:hidden; text-overflow:ellipsis; }
     .dot { width:9px; height:9px; border-radius:50%; flex:none; margin-top:3px; }
     small { display:block; font-size:inherit; }
@@ -511,7 +536,7 @@ export class AreaGlanceCard extends LitElement {
     .detail-entity strong, .detail-entity small { display:block; }
     .detail-entity small { margin-top:2px; color:var(--secondary-text-color); font-size:.75rem; }
     .detail-state { color:var(--secondary-text-color); white-space:nowrap; font-size:.86rem; }
-    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:minmax(100px, 1.25fr) minmax(0, 4fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.35rem); } .status { font-size:min(var(--area-glance-status-size, .85rem), .76rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 20px); height:min(var(--area-glance-icon-size, 24px), 20px); margin-bottom:1px; } .value { font-size:min(var(--area-glance-value-size, 1.6rem), .88rem); } .label { font-size:min(var(--area-glance-label-size, .82rem), .58rem); margin-top:1px; } }
+    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:118px minmax(0, 1fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.35rem); } .status { font-size:min(var(--area-glance-status-size, .85rem), .76rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 20px); height:min(var(--area-glance-icon-size, 24px), 20px); margin-bottom:1px; } .value { font-size:min(var(--area-glance-value-size, 1.6rem), .88rem); } .label { font-size:min(var(--area-glance-label-size, .82rem), .58rem); margin-top:1px; } }
   `;
 }
 
@@ -534,7 +559,9 @@ export class AreaGlanceCardEditor extends LitElement {
   private _statusBoolean(event: Event, key: keyof StatusConfig) { this._change({ status: { ...this._config.status, [key]: (event.target as HTMLInputElement).checked } }); }
   private _statusSourceChanged(event: Event) {
     const source = (event.target as HTMLSelectElement).value as NonNullable<StatusConfig["source"]>;
-    this._change({ status: { ...this._config.status, source, ...(source === "entity" ? {} : { entity: undefined }) } });
+    const previous = this._config.status;
+    const action = source === "entity" && previous?.action === "status-details" ? "more-info" : source !== "entity" && previous?.action === "more-info" ? "status-details" : previous?.action;
+    this._change({ status: { ...previous, source, action, ...(source === "entity" ? {} : { entity: undefined }) } });
   }
   private _statusEnabledChanged(event: Event) {
     const enabled = (event.target as HTMLInputElement).checked;
@@ -553,6 +580,13 @@ export class AreaGlanceCardEditor extends LitElement {
   }
   private _headerNavigationChanged(event: Event) {
     this._change({ header_action: { ...this._config.header_action, action: "navigate", navigation_path: (event.target as HTMLInputElement).value } });
+  }
+  private _statusActionChanged(event: Event) {
+    const action = (event.target as HTMLSelectElement).value as NonNullable<ActionConfig["action"]>;
+    this._change({ status: { ...this._config.status, action } });
+  }
+  private _statusNavigationChanged(event: Event) {
+    this._change({ status: { ...this._config.status, action: "navigate", navigation_path: (event.target as HTMLInputElement).value } });
   }
   private _purpose() {
     const profile = this._config.profile ?? "auto";
@@ -712,6 +746,7 @@ export class AreaGlanceCardEditor extends LitElement {
     const appearancePreset = this._config.appearance?.preset ?? "theme";
     const status = this._config.status;
     const statusSource = status?.source ?? (status?.entity ? "entity" : "area_motion");
+    const statusAction = status?.action ?? "none";
     const usesAreaStatus = Boolean(statusSignal(statusSource));
     const areaLabel = purpose === "energy" ? "Which energy area?" : purpose === "battery" ? "Where is the battery system?" : "Which area?";
     const currentAreaName = this._config.area ? this._areaName(this._config.area) : "this area";
@@ -769,7 +804,9 @@ export class AreaGlanceCardEditor extends LitElement {
           ${status ? html`
             <label>Status comes from<select .value=${statusSource} @change=${this._statusSourceChanged}><option value="area_presence">Presence in this area</option><option value="area_motion">Motion in this area</option><option value="area_doors">Doors in this area</option><option value="area_windows">Windows in this area</option><option value="area_leaks">Water leaks in this area</option><option value="entity">A specific entity</option></select></label>
             ${usesAreaStatus ? html`<ha-area-picker .hass=${this.hass} .value=${status.area ?? this._config.area ?? ""} .label=${statusSource === "area_doors" ? "Door area" : statusSource === "area_windows" ? "Window area" : statusSource === "area_leaks" ? "Area to check for leaks" : statusSource === "area_presence" ? "Presence area" : "Motion area"} @value-changed=${(e: Event) => this._change({ status: { ...status, source: statusSource, area: this._pickerValue(e) } })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${status.entity ?? ""} .label="Status entity" allow-custom-entity @value-changed=${(e: Event) => this._change({ status: { ...status, source: "entity", entity: this._pickerValue(e) } })}></ha-entity-picker>`}
-            ${statusSource === "area_doors" ? html`<p class="slot-hint">Closed doors show a green summary; open doors name the affected doors.</p>` : statusSource === "area_windows" ? html`<p class="slot-hint">Closed windows show a green summary; open windows need attention.</p>` : statusSource === "area_leaks" ? html`<p class="slot-hint">Dry is green; a detected leak is red.</p>` : statusSource === "area_presence" ? html`<p class="slot-hint">Presence means an occupancy or presence sensor is active. It is different from recent motion.</p>` : html`
+            <label>When the status is tapped<select .value=${statusAction} @change=${this._statusActionChanged}><option value="none">Do nothing</option>${usesAreaStatus ? html`<option value="status-details">Show matching entities</option><option value="area-details">Show area details</option>` : html`<option value="more-info">Show entity details</option>`}<option value="navigate">Navigate to a dashboard page</option></select></label>
+            ${statusAction === "navigate" ? html`<label>Dashboard path <input .value=${status.navigation_path ?? ""} placeholder="/dashboard/room" @input=${this._statusNavigationChanged}></label>` : nothing}
+            ${statusSource === "area_doors" ? html`<p class="slot-hint">Closed doors show a green summary; open doors show a clear count.</p>` : statusSource === "area_windows" ? html`<p class="slot-hint">Closed windows show a green summary; open windows need attention.</p>` : statusSource === "area_leaks" ? html`<p class="slot-hint">Dry is green; a detected leak is red.</p>` : statusSource === "area_presence" ? html`<p class="slot-hint">Presence means an occupancy or presence sensor is active. It is different from recent motion.</p>` : html`
               <div class="two"><label>When active <input .value=${status.active_text ?? ""} placeholder="Motion" @input=${(e: Event) => this._statusInput(e, "active_text")}></label><label>When inactive <input .value=${status.inactive_text ?? ""} placeholder="No motion" @input=${(e: Event) => this._statusInput(e, "inactive_text")}></label></div>
               <label class="checkbox"><input type="checkbox" .checked=${status.show_last_changed ?? false} @change=${(e: Event) => this._statusBoolean(e, "show_last_changed")}> Show when it last changed</label>
               ${status.show_last_changed ? html`<label>History label <input .value=${status.last_changed_text ?? ""} placeholder="Last motion" @input=${(e: Event) => this._statusInput(e, "last_changed_text")}></label>` : nothing}
