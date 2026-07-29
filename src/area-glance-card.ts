@@ -15,10 +15,10 @@ const SLOT_HELPERS: Record<MetricPreset, string> = {
   custom: "Show an entity using its native state and unit.",
 };
 const HEIGHT_OPTIONS = {
-  slim: { contentHeight: 64, stackedContentHeight: 122, metricRowHeight: 54, rows: 2, stackedRows: 3, scale: 0.82 },
-  compact: { contentHeight: 78, stackedContentHeight: 140, metricRowHeight: 62, rows: 2, stackedRows: 3, scale: 1 },
-  standard: { contentHeight: 94, stackedContentHeight: 160, metricRowHeight: 72, rows: 2, stackedRows: 3, scale: 1.15 },
-  comfortable: { contentHeight: 114, stackedContentHeight: 188, metricRowHeight: 84, rows: 3, stackedRows: 4, scale: 1.3 },
+  slim: { contentHeight: 64, stackedContentHeight: 122, metricRowHeight: 54, rows: 1.6, stackedRows: 2.8, scale: 0.82 },
+  compact: { contentHeight: 78, stackedContentHeight: 140, metricRowHeight: 62, rows: 1.9, stackedRows: 3, scale: 1 },
+  standard: { contentHeight: 94, stackedContentHeight: 160, metricRowHeight: 72, rows: 2.2, stackedRows: 3.4, scale: 1.15 },
+  comfortable: { contentHeight: 114, stackedContentHeight: 188, metricRowHeight: 84, rows: 2.8, stackedRows: 4, scale: 1.3 },
 } as const;
 const APPEARANCE_PRESETS = {
   theme: { theme: "auto", background: undefined },
@@ -47,14 +47,24 @@ interface MetricDisplay {
   color?: string;
   value: string;
   label: string;
+  entities?: string[];
+  aggregate?: boolean;
+}
+
+interface DetailSheet {
+  title: string;
+  subtitle: string;
+  entities: string[];
+  emptyMessage: string;
 }
 
 export class AreaGlanceCard extends LitElement {
   public hass?: HassLike;
   private _config?: AreaGlanceConfig;
+  private _detail?: DetailSheet;
 
   static get properties() {
-    return { hass: { attribute: false }, _config: { state: true } };
+    return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true } };
   }
 
   static getConfigElement() {
@@ -72,14 +82,14 @@ export class AreaGlanceCard extends LitElement {
     this._config = { ...config, metrics: config.metrics?.length ? config.metrics : DEFAULT_METRICS };
   }
 
-  private _heightOption() { return HEIGHT_OPTIONS[this._config?.height ?? "compact"]; }
+  private _heightOption() { return HEIGHT_OPTIONS[this._config?.height ?? "slim"]; }
   private _gridRows() {
     const height = this._heightOption();
     return this._config?.layout === "stacked" ? height.stackedRows : height.rows;
   }
 
   public getCardSize() { return this._gridRows(); }
-  public getGridOptions() { const rows = this._gridRows(); return { rows, columns: 12, min_rows: rows, max_rows: rows, min_columns: 6 }; }
+  public getGridOptions() { return { columns: 12, min_columns: 6 }; }
 
   protected willUpdate(changed: PropertyValues<this>) {
     if (changed.has("hass")) this.requestUpdate();
@@ -112,7 +122,7 @@ export class AreaGlanceCard extends LitElement {
     if (preset === "lights") {
       const lights = this._areaEntities(area, metric.domain ?? "light");
       const on = lights.filter((id) => this.hass?.states[id]?.state === "on").length;
-      return { icon, color: metric.color ?? "var(--warning-color, #e0af00)", value: `${on}/${lights.length}`, label };
+      return { icon, color: metric.color ?? "var(--warning-color, #e0af00)", value: `${on}/${lights.length}`, label, entities: lights, aggregate: true };
     }
     const matches = (entityId: string) => {
       const state = this.hass?.states[entityId];
@@ -134,7 +144,7 @@ export class AreaGlanceCard extends LitElement {
       const useKilowatts = metric.unit === "kW" || (!metric.unit && Math.abs(watts) >= 1000);
       const displayed = useKilowatts ? watts / 1000 : watts;
       const decimals = metric.decimals ?? (useKilowatts ? 1 : 0);
-      return { icon, color: metric.color, value: `${displayed.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${metric.unit ?? (useKilowatts ? "kW" : "W")}`, label };
+      return { icon, color: metric.color, value: `${displayed.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${metric.unit ?? (useKilowatts ? "kW" : "W")}`, label, entities: values.map((item) => item.entityId), aggregate: true };
     }
 
     const sorted = values.map((item) => item.value).sort((left, right) => left - right);
@@ -144,7 +154,7 @@ export class AreaGlanceCard extends LitElement {
     const decimals = metric.decimals ?? 0;
     const inferredUnit = String(values[0].state.attributes.unit_of_measurement ?? "");
     const unit = metric.unit ?? (format === "temperature" ? "°" : format === "percent" ? "%" : inferredUnit);
-    return { icon, color: metric.color, value: `${number.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit}`, label };
+    return { icon, color: metric.color, value: `${number.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit}`, label, entities: values.map((item) => item.entityId), aggregate: true };
   }
 
   private _metric(metric: MetricConfig): MetricDisplay | undefined {
@@ -220,6 +230,10 @@ export class AreaGlanceCard extends LitElement {
     const kind = config?.action ?? "more-info";
     const entity = config?.entity ?? fallbackEntity;
     if (kind === "none") return;
+    if (kind === "area-details") {
+      this._openAreaDetails();
+      return;
+    }
     if (kind === "more-info" && entity) {
       this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId: entity }, bubbles: true, composed: true }));
     } else if (kind === "navigate" && config?.navigation_path) {
@@ -233,6 +247,56 @@ export class AreaGlanceCard extends LitElement {
     }
   }
 
+  private _entityName(entityId: string) {
+    return String(this.hass?.states[entityId]?.attributes.friendly_name ?? entityId);
+  }
+
+  private _entityState(entityId: string) {
+    const state = this.hass?.states[entityId];
+    if (!state) return "Unavailable";
+    return this.hass?.formatEntityState?.(state) ?? `${friendlyState(state.state)}${state.attributes.unit_of_measurement ? ` ${state.attributes.unit_of_measurement}` : ""}`;
+  }
+
+  private _openAreaDetails() {
+    const area = this._config?.area;
+    const title = area ? this._areaName(area) ?? "Area" : this._config?.title ?? "Home";
+    this._detail = { title, subtitle: area ? "Entities in this area" : "Entities included in this view", entities: this._areaEntities(area), emptyMessage: "No entities are assigned to this area." };
+  }
+
+  private _openMetricDetails(metric: MetricConfig, display: MetricDisplay) {
+    const area = metric.area ?? this._config?.area;
+    this._detail = {
+      title: display.label,
+      subtitle: area ? `Included from ${this._areaName(area) ?? "this area"}` : "Included entities",
+      entities: display.entities ?? [],
+      emptyMessage: "No compatible entities are currently contributing to this insight.",
+    };
+  }
+
+  private _metricClicked(metric: MetricConfig, display: MetricDisplay, event: Event) {
+    event.stopPropagation();
+    const preset = metric.preset ?? "custom";
+    if (metric.action && metric.action !== "more-info") {
+      this._runAction(metric, metric.entity);
+      return;
+    }
+    if (this._metricSource(metric, preset) === "area") {
+      this._openMetricDetails(metric, display);
+      return;
+    }
+    this._runAction(metric, metric.entity);
+  }
+
+  private _headerClicked() { this._runAction(this._config?.header_action ?? this._config); }
+  private _closeDetail() { this._detail = undefined; }
+
+  protected updated(changed: PropertyValues<this>) {
+    if (!changed.has("_detail" as never)) return;
+    const dialog = this.renderRoot.querySelector<HTMLDialogElement>(".detail-sheet");
+    if (this._detail && dialog && !dialog.open) dialog.showModal();
+    if (!this._detail && dialog?.open) dialog.close();
+  }
+
   protected render() {
     if (!this._config) return nothing;
     const status = this._status();
@@ -242,8 +306,10 @@ export class AreaGlanceCard extends LitElement {
     const appearance = this._config.appearance;
     const background = appearance?.background ?? this._config.background;
     const noShadow = appearance?.shadow === false;
+    const headerAction = this._config.header_action ?? this._config;
+    const headerClickable = Boolean(headerAction.action && headerAction.action !== "none");
     return html`
-      <ha-card class=${`${this._config.theme === "dark" ? "force-dark" : this._config.theme === "light" ? "force-light" : ""}${noShadow ? " no-shadow" : ""}`} style=${`--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);${background ? `--area-glance-card-background:${background}` : ""}`} @click=${() => this._runAction()}>
+      <ha-card class=${`${this._config.theme === "dark" ? "force-dark" : this._config.theme === "light" ? "force-light" : ""}${noShadow ? " no-shadow" : ""}${headerClickable ? " clickable" : ""}`} style=${`--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);${background ? `--area-glance-card-background:${background}` : ""}`} @click=${this._headerClicked}>
         <section class=${showHeader ? `layout${this._config.layout === "stacked" ? " stacked" : ""}` : "layout metrics-only"} style=${this._layoutStyle()}>
           ${showHeader ? html`<div class="summary">
               <div class="title">${title}</div>
@@ -251,7 +317,7 @@ export class AreaGlanceCard extends LitElement {
             </div>` : nothing}
           <div class="metrics" style=${`--metric-count:${Math.max(metrics.length, 1)}`}>
             ${metrics.map(({ metric, display }) => html`
-              <button class="metric" aria-label=${display.label} @click=${(event: Event) => { event.stopPropagation(); this._runAction(metric, metric.entity); }}>
+              <button class="metric" aria-label=${`${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)}>
                 <ha-icon .icon=${display.icon} style=${display.color ? `color:${display.color}` : ""}></ha-icon>
                 <span class="value">${display.value}</span>
                 <span class="label">${display.label}</span>
@@ -259,12 +325,19 @@ export class AreaGlanceCard extends LitElement {
             `)}
           </div>
         </section>
-      </ha-card>`;
+      </ha-card>
+      <dialog class="detail-sheet" @close=${this._closeDetail} @click=${(event: Event) => { if (event.target === event.currentTarget) this._closeDetail(); }}>
+        ${this._detail ? html`<div class="detail-content">
+          <div class="detail-heading"><div><h2>${this._detail.title}</h2><p>${this._detail.subtitle}</p></div><button class="detail-close" aria-label="Close" @click=${this._closeDetail}>×</button></div>
+          ${this._detail.entities.length ? html`<div class="detail-entities">${this._detail.entities.map((entityId) => html`<button class="detail-entity" @click=${() => { this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId }, bubbles: true, composed: true })); this._closeDetail(); }}><span><strong>${this._entityName(entityId)}</strong><small>${entityId}</small></span><span class="detail-state">${this._entityState(entityId)}</span></button>`)}</div>` : html`<p class="detail-empty">${this._detail.emptyMessage}</p>`}
+        </div>` : nothing}
+      </dialog>`;
   }
 
   static styles = css`
-    :host { display:block; padding-block:4px; --area-glance-accent:var(--primary-color); }
-    ha-card { overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 8%, transparent); border-radius:var(--area-glance-card-border-radius, 24px); cursor:pointer; background:var(--area-glance-card-background, var(--ha-card-background, var(--card-background-color))); box-shadow:var(--ha-card-box-shadow, 0 8px 24px rgb(0 0 0 / 18%)); }
+    :host { display:block; --area-glance-accent:var(--primary-color); }
+    ha-card { overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 8%, transparent); border-radius:var(--area-glance-card-border-radius, 24px); cursor:default; background:var(--area-glance-card-background, var(--ha-card-background, var(--card-background-color))); box-shadow:var(--ha-card-box-shadow, 0 8px 24px rgb(0 0 0 / 18%)); }
+    ha-card.clickable { cursor:pointer; }
     ha-card.no-shadow { box-shadow:none; }
     .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:minmax(126px, 1.65fr) minmax(0, 4fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
     .layout.metrics-only { grid-template-columns:minmax(0, 1fr); }
@@ -286,7 +359,20 @@ export class AreaGlanceCard extends LitElement {
     .label { color:var(--secondary-text-color); font-size:var(--area-glance-label-size, .82rem); line-height:1.08; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; margin-top:2px; }
     .force-dark { --ha-card-background:#353c45; --primary-text-color:#f5f7fb; --secondary-text-color:#aeb8c7; }
     .force-light { --ha-card-background:#f8f9fb; --primary-text-color:#18212e; --secondary-text-color:#667085; }
-    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { min-height:72px; grid-template-columns:minmax(104px, 1.35fr) minmax(0, 4fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.5rem); } .status { font-size:min(var(--area-glance-status-size, .85rem), .78rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .value { font-size:min(var(--area-glance-value-size, 1.6rem), 1.1rem); } .label { font-size:min(var(--area-glance-label-size, .82rem), .64rem); margin-top:1px; } }
+    .detail-sheet { width:min(480px, calc(100vw - 32px)); max-height:min(70vh, 620px); padding:0; border:0; border-radius:16px; color:var(--primary-text-color); background:var(--ha-card-background, var(--card-background-color)); box-shadow:0 18px 50px rgb(0 0 0 / 28%); }
+    .detail-sheet::backdrop { background:rgb(0 0 0 / 38%); }
+    .detail-content { padding:20px; }
+    .detail-heading { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }
+    .detail-heading h2 { margin:0; font-size:1.2rem; }
+    .detail-heading p, .detail-empty { margin:4px 0 0; color:var(--secondary-text-color); }
+    .detail-close { appearance:none; border:0; width:32px; height:32px; border-radius:50%; color:var(--primary-text-color); background:color-mix(in srgb, var(--primary-text-color) 8%, transparent); font:1.5rem/1 sans-serif; cursor:pointer; }
+    .detail-entities { display:grid; gap:4px; max-height:50vh; overflow:auto; }
+    .detail-entity { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; padding:10px; border:0; border-radius:9px; color:var(--primary-text-color); background:transparent; text-align:left; font:inherit; cursor:pointer; }
+    .detail-entity:hover { background:color-mix(in srgb, var(--area-glance-accent) 9%, transparent); }
+    .detail-entity strong, .detail-entity small { display:block; }
+    .detail-entity small { margin-top:2px; color:var(--secondary-text-color); font-size:.75rem; }
+    .detail-state { color:var(--secondary-text-color); white-space:nowrap; font-size:.86rem; }
+    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:minmax(104px, 1.35fr) minmax(0, 4fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.5rem); } .status { font-size:min(var(--area-glance-status-size, .85rem), .78rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .value { font-size:min(var(--area-glance-value-size, 1.6rem), 1.1rem); } .label { font-size:min(var(--area-glance-label-size, .82rem), .64rem); margin-top:1px; } }
   `;
 }
 
@@ -322,6 +408,13 @@ export class AreaGlanceCardEditor extends LitElement {
   private _metricBoolean(index: number, key: "hidden") { return (event: Event) => this._updateMetric(index, { [key]: (event.target as HTMLInputElement).checked }); }
   private _layoutChanged(event: Event) { this._change({ layout: (event.target as HTMLSelectElement).value as AreaGlanceConfig["layout"] }); }
   private _heightChanged(event: Event) { this._change({ height: (event.target as HTMLSelectElement).value as AreaGlanceConfig["height"] }); }
+  private _headerActionChanged(event: Event) {
+    const action = (event.target as HTMLSelectElement).value as NonNullable<ActionConfig["action"]>;
+    this._change({ header_action: { ...this._config.header_action, action } });
+  }
+  private _headerNavigationChanged(event: Event) {
+    this._change({ header_action: { ...this._config.header_action, action: "navigate", navigation_path: (event.target as HTMLInputElement).value } });
+  }
   private _purpose() {
     const profile = this._config.profile ?? "auto";
     if (profile === "house") return "house";
@@ -468,6 +561,7 @@ export class AreaGlanceCardEditor extends LitElement {
     const statusSource = status?.source ?? (status?.entity ? "entity" : "area_motion");
     const areaLabel = purpose === "energy" ? "Which energy area?" : purpose === "battery" ? "Where is the battery system?" : "Which area?";
     const currentAreaName = this._config.area ? this._areaName(this._config.area) : "this area";
+    const headerAction = this._config.header_action?.action ?? "none";
     return html`<div class="editor">
       <h3>Area Glance</h3>
       <p class="hint">Choose a place first. Area Glance suggests useful live insights; you can change any of them afterwards.</p>
@@ -510,10 +604,10 @@ export class AreaGlanceCardEditor extends LitElement {
       </section>
       <details class="settings"><summary>Header</summary>
         <label>Card layout<select .value=${this._config.layout ?? "header"} @change=${this._layoutChanged}><option value="header">Title beside insights (default)</option><option value="stacked">Title above insights</option><option value="metrics-only">Insights only</option></select></label>
-        ${this._config.layout !== "metrics-only" ? html`<label>Title <input .value=${this._config.title ?? ""} placeholder=${currentAreaName} @input=${(e: Event) => this._input(e, "title")}></label><label class="checkbox"><input type="checkbox" .checked=${Boolean(status)} @change=${this._statusEnabledChanged}> Show a status line</label>${status ? html`<label>Status comes from<select .value=${statusSource} @change=${this._statusSourceChanged}><option value="area_motion">Motion in this area</option><option value="entity">A specific entity</option></select></label>${statusSource === "area_motion" ? html`<ha-area-picker .hass=${this.hass} .value=${status.area ?? this._config.area ?? ""} .label=${"Motion area"} @value-changed=${(e: Event) => this._change({ status: { ...status, source: "area_motion", area: this._pickerValue(e) } })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${status.entity ?? ""} .label=${"Status entity"} allow-custom-entity @value-changed=${(e: Event) => this._change({ status: { ...status, source: "entity", entity: this._pickerValue(e) } })}></ha-entity-picker>`}<div class="two"><label>When active <input .value=${status.active_text ?? ""} placeholder="Motion" @input=${(e: Event) => this._statusInput(e, "active_text")}></label><label>When inactive <input .value=${status.inactive_text ?? ""} placeholder="No motion" @input=${(e: Event) => this._statusInput(e, "inactive_text")}></label></div><label class="checkbox"><input type="checkbox" .checked=${status.show_last_changed ?? false} @change=${(e: Event) => this._statusBoolean(e, "show_last_changed")}> Show when it last changed</label>${status.show_last_changed ? html`<label>History label <input .value=${status.last_changed_text ?? ""} placeholder="Last motion" @input=${(e: Event) => this._statusInput(e, "last_changed_text")}></label>` : nothing}` : nothing}` : nothing}
+        ${this._config.layout !== "metrics-only" ? html`<label>Title <input .value=${this._config.title ?? ""} placeholder=${currentAreaName} @input=${(e: Event) => this._input(e, "title")}></label><label>When the header is tapped<select .value=${headerAction} @change=${this._headerActionChanged}><option value="none">Do nothing</option><option value="area-details">Show area details</option><option value="navigate">Navigate to a dashboard page</option></select></label>${headerAction === "navigate" ? html`<label>Dashboard path <input .value=${this._config.header_action?.navigation_path ?? ""} placeholder="/dashboard/room" @input=${this._headerNavigationChanged}></label>` : nothing}<label class="checkbox"><input type="checkbox" .checked=${Boolean(status)} @change=${this._statusEnabledChanged}> Show a status line</label>${status ? html`<label>Status comes from<select .value=${statusSource} @change=${this._statusSourceChanged}><option value="area_motion">Motion in this area</option><option value="entity">A specific entity</option></select></label>${statusSource === "area_motion" ? html`<ha-area-picker .hass=${this.hass} .value=${status.area ?? this._config.area ?? ""} .label=${"Motion area"} @value-changed=${(e: Event) => this._change({ status: { ...status, source: "area_motion", area: this._pickerValue(e) } })}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${status.entity ?? ""} .label=${"Status entity"} allow-custom-entity @value-changed=${(e: Event) => this._change({ status: { ...status, source: "entity", entity: this._pickerValue(e) } })}></ha-entity-picker>`}<div class="two"><label>When active <input .value=${status.active_text ?? ""} placeholder="Motion" @input=${(e: Event) => this._statusInput(e, "active_text")}></label><label>When inactive <input .value=${status.inactive_text ?? ""} placeholder="No motion" @input=${(e: Event) => this._statusInput(e, "inactive_text")}></label></div><label class="checkbox"><input type="checkbox" .checked=${status.show_last_changed ?? false} @change=${(e: Event) => this._statusBoolean(e, "show_last_changed")}> Show when it last changed</label>${status.show_last_changed ? html`<label>History label <input .value=${status.last_changed_text ?? ""} placeholder="Last motion" @input=${(e: Event) => this._statusInput(e, "last_changed_text")}></label>` : nothing}` : nothing}` : nothing}
       </details>
       <details class="settings"><summary>Card appearance</summary>
-        <label>Size<select .value=${this._config.height ?? "compact"} @change=${this._heightChanged}><option value="slim">Slim</option><option value="compact">Compact (default)</option><option value="standard">Medium</option><option value="comfortable">Tall</option></select></label>
+        <label>Size<select .value=${this._config.height ?? "slim"} @change=${this._heightChanged}><option value="slim">Slim (default)</option><option value="compact">Compact</option><option value="standard">Medium</option><option value="comfortable">Tall</option></select></label>
         <label>Colour style<select .value=${appearancePreset} @change=${this._appearancePresetChanged}><option value="theme">Use dashboard theme</option><option value="light">Light</option><option value="slate">Slate</option><option value="charcoal">Dark</option><option value="custom">Custom background</option></select></label>
         ${appearancePreset === "custom" ? html`<label>Background colour <input type="color" .value=${this._config.appearance?.background ?? "#353c45"} @input=${this._customBackgroundChanged}></label>` : nothing}
         <label class="checkbox"><input type="checkbox" .checked=${this._config.appearance?.shadow !== false} @change=${this._shadowChanged}> Show drop shadow</label>

@@ -24,7 +24,7 @@ export interface HassLike {
 }
 
 export interface ActionConfig {
-  action?: "more-info" | "navigate" | "toggle" | "call-service" | "none";
+  action?: "more-info" | "navigate" | "toggle" | "call-service" | "area-details" | "none";
   entity?: string;
   navigation_path?: string;
   service?: string;
@@ -65,6 +65,7 @@ export interface AreaGlanceConfig extends ActionConfig {
   area?: string;
   status?: StatusConfig;
   metrics?: MetricConfig[];
+  header_action?: ActionConfig;
   layout?: "header" | "stacked" | "metrics-only";
   height?: "slim" | "compact" | "standard" | "comfortable";
   profile?: "auto" | "room" | "media" | "battery" | "energy" | "house";
