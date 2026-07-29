@@ -1,5 +1,6 @@
 {
   "name": "Area Glance Card",
+  "content_in_root": true,
   "filename": "area-glance-card.js",
   "render_readme": true
 }
