@@ -3,9 +3,9 @@ import type { MetricConfig, MetricPreset } from "./types";
 type Preset = Required<Pick<MetricConfig, "icon" | "label" | "format">> & { color: string };
 
 export const PRESETS: Record<MetricPreset, Preset> = {
-  temperature: { icon: "mdi:thermometer", label: "Temperature", format: "temperature", color: "var(--red-color, #f44336)" },
+  temperature: { icon: "mdi:thermometer", label: "Temp", format: "temperature", color: "var(--red-color, #f44336)" },
   humidity: { icon: "mdi:water-percent", label: "Humidity", format: "percent", color: "var(--blue-color, #2196f3)" },
-  lights: { icon: "mdi:lightbulb-group-outline", label: "Lights", format: "auto", color: "var(--yellow-color, #fbc02d)" },
+  lights: { icon: "mdi:lightbulb-group-outline", label: "Lights", format: "auto", color: "var(--area-glance-lights-color, #d4a900)" },
   power: { icon: "mdi:lightning-bolt", label: "Power", format: "power", color: "var(--amber-color, #ff9800)" },
   battery: { icon: "mdi:battery", label: "Battery", format: "percent", color: "var(--blue-color, #2196f3)" },
   co2: { icon: "mdi:molecule-co2", label: "CO₂", format: "auto", color: "var(--green-color, #43a047)" },
@@ -16,6 +16,11 @@ export const PRESETS: Record<MetricPreset, Preset> = {
   presence: { icon: "mdi:account-check-outline", label: "Presence", format: "auto", color: "var(--green-color, #43a047)" },
   doors: { icon: "mdi:door-closed", label: "Doors", format: "auto", color: "var(--green-color, #43a047)" },
   windows: { icon: "mdi:window-closed-variant", label: "Windows", format: "auto", color: "var(--green-color, #43a047)" },
+  blinds: { icon: "mdi:blinds-horizontal", label: "Blinds", format: "auto", color: "var(--blue-color, #2196f3)" },
+  locks: { icon: "mdi:lock", label: "Locks", format: "auto", color: "var(--green-color, #43a047)" },
+  alarm: { icon: "mdi:shield-home-outline", label: "Alarm", format: "auto", color: "var(--secondary-text-color)" },
+  camera: { icon: "mdi:cctv", label: "Camera", format: "auto", color: "var(--blue-color, #2196f3)" },
+  attention: { icon: "mdi:alert-circle-outline", label: "Attention", format: "auto", color: "var(--amber-color, #ff9800)" },
   leaks: { icon: "mdi:water-check-outline", label: "Leaks", format: "auto", color: "var(--green-color, #43a047)" },
   people_home: { icon: "mdi:account-group", label: "People home", format: "auto", color: "var(--green-color, #43a047)" },
   occupancy: { icon: "mdi:account-group", label: "Occupancy helper", format: "auto", color: "var(--green-color, #43a047)" },
@@ -28,7 +33,7 @@ export const presetMetric = (preset: MetricPreset = "temperature"): MetricConfig
   return {
     preset,
     ...defaults,
-    ...(["temperature", "humidity", "lights", "power", "co2", "pm25", "voc", "aqi", "motion", "presence", "doors", "windows", "leaks"].includes(preset) ? { source: "area" as const } : {}),
+    ...(["temperature", "humidity", "lights", "power", "co2", "pm25", "voc", "aqi", "motion", "presence", "doors", "windows", "blinds", "locks", "attention", "leaks"].includes(preset) ? { source: "area" as const } : {}),
     hide_unavailable: true,
   };
 };

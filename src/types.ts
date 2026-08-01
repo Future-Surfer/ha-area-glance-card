@@ -12,6 +12,11 @@ export type MetricPreset =
   | "presence"
   | "doors"
   | "windows"
+  | "blinds"
+  | "locks"
+  | "alarm"
+  | "camera"
+  | "attention"
   | "leaks"
   | "people_home"
   /** Legacy name retained so existing configurations continue to work. */
@@ -19,7 +24,7 @@ export type MetricPreset =
   | "device"
   | "custom";
 
-export type AreaSignal = "motion" | "presence" | "doors" | "windows" | "leaks";
+export type AreaSignal = "motion" | "presence" | "doors" | "windows" | "blinds" | "locks" | "leaks";
 
 export interface EntityState {
   state: string;
@@ -46,7 +51,7 @@ export interface ActionConfig {
 }
 
 export interface StatusConfig extends ActionConfig {
-  source?: "area_motion" | "area_presence" | "area_doors" | "area_windows" | "area_leaks" | "entity";
+  source?: "security" | "area_motion" | "area_presence" | "area_doors" | "area_windows" | "area_leaks" | "entity";
   area?: string;
   active_text?: string;
   inactive_text?: string;
@@ -71,11 +76,24 @@ export interface MetricConfig extends ActionConfig {
   /** Ordered numeric colour rules for standard measurement insights. */
   thresholds?: { above?: number; below?: number; color: string }[];
   aggregation?: "median" | "highest" | "lowest" | "sum";
+  /** Controls membership after Home Assistant metadata has identified compatible area entities. */
+  membership?: {
+    /** `auto_except` keeps future compatible entities included by default. */
+    mode?: "auto_except" | "selected_only";
+    exclude?: string[];
+    include?: string[];
+  };
+  /** Checks shown by the Attention aggregate. Both are enabled when omitted. */
+  attention_types?: ("unavailable" | "updates")[];
+  /** Attention can check the card's area or the whole Home Assistant instance. */
+  attention_scope?: "area" | "home";
   area?: string;
   domain?: string;
   label?: string;
   icon?: string;
   color?: string;
+  /** Reverse the sign of a power reading before it is aggregated or displayed. */
+  invert_value?: boolean;
   decimals?: number;
   unit?: string;
   show_unit?: boolean;
@@ -97,8 +115,10 @@ export interface AreaGlanceConfig extends ActionConfig {
   metrics?: MetricConfig[];
   header_action?: ActionConfig;
   layout?: "header" | "stacked" | "metrics-only";
+  /** Text alignment is used by the title-above-insights layout. */
+  header_alignment?: "left" | "center" | "right";
   height?: "slim" | "compact" | "standard" | "comfortable";
-  profile?: "auto" | "room" | "media" | "battery" | "energy" | "house";
+  profile?: "auto" | "room" | "media" | "battery" | "energy" | "house" | "security";
   appearance?: {
     preset?: "theme" | "light" | "slate" | "charcoal" | "custom";
     background?: string;

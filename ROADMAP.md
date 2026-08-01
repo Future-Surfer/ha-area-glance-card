@@ -15,6 +15,7 @@ The card is not intended to become a generic dashboard layout engine, a templati
 - Keep the visual band compact, responsive, and consistent when several cards are stacked.
 - Make automatic behaviour inspectable: users should be able to see what contributes to an aggregate and why.
 - Preserve explicit control: a specific-entity or Custom combination slot may override automatic inference.
+- Treat security language with care: report monitored entities and active conditions, never imply coverage the card cannot verify.
 
 ## Current baseline
 
@@ -23,7 +24,19 @@ The card is not intended to become a generic dashboard layout engine, a templati
 - Automatic temperature, humidity, lights, live power, CO₂, PM2.5, VOC, AQI, motion, presence, doors, windows, and leak summaries.
 - Strict measurement matching for automatic numeric area insights, with a narrow legacy fallback for classless CO₂ sensors.
 - Header and status actions, plus contributor detail sheets for aggregates.
+- Automatic blind summaries use Home Assistant cover device classes; blinds, shades, shutters, and curtains are included while garage and door covers remain separate.
+- Aggregate insights support automatic exclusions or deliberate selected-only membership, while keeping compatibility checks and contributor sheets truthful.
+- An optional Attention insight reports unavailable entities and available updates for an area or the whole home.
 - A Custom combination insight for power users who need separate main and supporting entities, an icon source, and state-to-colour rules.
+- A whole-home Security profile with conservative alarm, door, window, and lock summaries; it prioritises active issues and never claims unverified coverage.
+
+### Coverage audit
+
+Automatic matching now covers the common area-summary signals with Home Assistant metadata rather than entity-name searches: temperature, humidity, power, COâ‚‚, particulate matter, VOC, AQI, lights, motion/presence, openings, leaks, recognised blind covers, locks, alarms, and update availability. Power accepts the official `power` device class and standard power units, retaining a narrow classless fallback for older integrations. Locks and update availability also accept their legacy binary-sensor device classes.
+
+Broader domains such as vacuum, climate, weather, cameras, and robot vacuums remain intentionally available through **A specific entity** rather than as automatic aggregates. This keeps a suggested area card dependable: finding an entity is useful, but pretending to infer the right summary policy is not.
+
+Known limits remain explicit: Attention counts affected **entities**, not deduplicated physical devices; and no automatic smoke, gas, CO, or generic-problem aggregate is suggested until its wording and coverage rules can be made as trustworthy as Security's existing signals.
 
 ## Roadmap
 
@@ -92,6 +105,36 @@ The card is not intended to become a generic dashboard layout engine, a templati
 
 **Done when:** a user can make a chosen device or sensor read naturally in a segment without YAML or unnecessary layout tuning.
 
+### 6. Whole-home Security profile
+
+**Status:** Implemented in the current development build.
+
+**Goal:** Add a compact, dependable security overview alongside Whole home, Energy, and Home battery without turning Area Glance into a security dashboard.
+
+- Add **Security** as a first-choice profile. It is whole-home by default; an area remains optional for a focused entry-point view.
+- Suggest only broadly reliable defaults: alarm state, monitored doors, monitored windows, and locks. Use Home Assistant domains and device classes rather than names.
+- Prioritise attention in the header: an alarm trigger first, then open doors/windows or unlocked locks. With no active issue, say **All monitored openings closed** rather than claiming the whole home is secure.
+- Keep the default segments predictable: **Alarm**, **Doors**, **Windows**, and **Locks**. Smoke/CO, leaks, garage doors, motion, and a selected camera are optional swaps, not assumed coverage.
+- Reuse contributor sheets for aggregate segments so tapping Doors or Windows shows precisely which monitored entities are included.
+- Support camera navigation or a selected-camera state as an optional segment. Do not put a live camera feed in the compact default band.
+- Consider a small static camera thumbnail only as a separately enabled, stacked-layout enhancement after the core profile is proven useful.
+
+**Done when:** a user can choose Security and receive a truthful, useful whole-home summary without manually identifying every sensor; active conditions are obvious, and the card never overstates what it is monitoring.
+
+### 7. Prescribed expanded layouts
+
+**Status:** Explored; awaiting a visual prototype before implementation.
+
+**Goal:** Let Area Glance become a larger, still legible summary card without becoming a generic dashboard-layout system.
+
+- Keep the existing compact band as the default and retain its five-insight limit.
+- Add one opt-in **Insight grid** layout: a header above a responsive grid of equal-size insight tiles. It may support two to eight insights, with a small, deliberate column choice rather than per-tile placement.
+- Add one opt-in **Insight tower** layout designed for a single Home Assistant dashboard column: a header followed by vertically arranged, compact insight rows. It should favour scanability over dense metric text.
+- Both variants should reuse the existing presets, aggregate membership, contributor sheets, actions, appearance settings, and header alignment. No separate metric model or templating language is needed.
+- Validate both layouts in Card Lab at a narrow phone width, one standard dashboard column, and a wide desktop span before exposing them in the editor.
+
+**Done when:** a user can select one clearly named expanded layout and get a coherent card immediately, while the default editor and default band remain as simple as today.
+
 ## Documentation and release work
 
 Refresh the README alongside the first release containing the roadmap work:
@@ -109,8 +152,9 @@ These are deliberately outside the current roadmap unless a clear area-summary u
 
 - General-purpose templates or JavaScript expressions in card configuration.
 - Arbitrary custom CSS fields beyond supported theme variables and appearance options.
-- Saved/shareable layout libraries and broad dashboard templating.
+- Saved/shareable layout libraries, arbitrary grid placement, and broad dashboard templating.
 - Rich media artwork, vacuum controls, or climate controls as default segment types.
+- Always-on camera feeds or live video inside the compact band; cameras should initially open a dedicated view instead.
 - Low-priority responsive hiding, special alert-card treatments, and arbitrary fallback messages.
 - An exhaustive list of every Home Assistant sensor device class.
 
