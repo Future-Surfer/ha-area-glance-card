@@ -8,7 +8,7 @@ const DEFAULT_SECURITY_METRICS = [presetMetric("alarm"), presetMetric("doors"), 
 const AREA_SIGNAL_PRESETS = new Set<MetricPreset>(["motion", "presence", "doors", "windows", "blinds", "locks", "leaks"]);
 const AREA_MEASUREMENT_PRESETS = new Set<MetricPreset>(["temperature", "humidity", "power", "co2", "pm25", "voc", "aqi"]);
 const AUTOMATIC_METRIC_PRESETS: MetricPreset[] = ["temperature", "humidity", "lights", "power", "co2", "pm25", "voc", "aqi", "motion", "presence", "doors", "windows", "blinds", "locks", "attention", "leaks"];
-const DEVICE_METRIC_PRESETS: MetricPreset[] = ["alarm", "camera", "people_home", "battery", "device", "custom"];
+const DEVICE_METRIC_PRESETS: MetricPreset[] = ["alarm", "camera", "weather", "people_home", "battery", "device", "clock", "calendar", "custom"];
 const statusSignal = (source: StatusConfig["source"]): AreaSignal | undefined => {
   if (source === "area_motion") return "motion";
   if (source === "area_presence") return "presence";
@@ -36,6 +36,9 @@ const SLOT_HELPERS: Record<MetricPreset, string> = {
   attention: "Show unavailable entities and updates that need attention in an area or across the whole home.",
   alarm: "Show the state of one Home Assistant alarm control panel.",
   camera: "Show one chosen camera's state. Use its action to open a dedicated camera view.",
+  weather: "Show one Weather entity with a live condition icon, or one of its current readings.",
+  clock: "Show the current local time as a digital readout or an analogue clock face.",
+  calendar: "Show today's date as a compact calendar tile. It does not need an entity.",
   leaks: "Show Dry until any compatible area water-leak sensor reports a leak.",
   people_home: "Show the current count from Home Assistant's Home zone.",
   occupancy: "Show the state of one chosen occupancy helper (legacy option).",
@@ -54,6 +57,36 @@ const APPEARANCE_PRESETS = {
   slate: { theme: "dark", background: "#8d97a3" },
   charcoal: { theme: "dark", background: "#353c45" },
 } as const;
+
+const WEATHER_ICONS: Record<string, string> = {
+  "clear-night": "mdi:weather-night",
+  cloudy: "mdi:weather-cloudy",
+  exceptional: "mdi:weather-cloudy-alert",
+  fog: "mdi:weather-fog",
+  hail: "mdi:weather-hail",
+  lightning: "mdi:weather-lightning",
+  "lightning-rainy": "mdi:weather-lightning-rainy",
+  partlycloudy: "mdi:weather-partly-cloudy",
+  pouring: "mdi:weather-pouring",
+  rainy: "mdi:weather-rainy",
+  snowy: "mdi:weather-snowy",
+  "snowy-rainy": "mdi:weather-snowy-rainy",
+  sunny: "mdi:weather-sunny",
+  windy: "mdi:weather-windy",
+  "windy-variant": "mdi:weather-windy-variant",
+};
+
+const weatherColor = (condition: string, fallback: string): string =>
+  ["sunny", "lightning", "lightning-rainy"].includes(condition) ? "var(--amber-color, #ff9800)"
+    : condition === "clear-night" ? "var(--indigo-color, #5c6bc0)"
+      : ["rainy", "pouring", "hail", "snowy", "snowy-rainy"].includes(condition) ? "var(--blue-color, #2196f3)"
+        : fallback;
+
+const ordinal = (day: number): string => {
+  const remainder = day % 100;
+  if (remainder >= 11 && remainder <= 13) return `${day}th`;
+  return `${day}${({ 1: "st", 2: "nd", 3: "rd" } as Record<number, string>)[day % 10] ?? "th"}`;
+};
 
 const asNumber = (value: string): number | undefined => {
   const number = Number(value);
@@ -205,6 +238,7 @@ interface MetricDisplay {
   showLabel?: boolean;
   entities?: string[];
   aggregate?: boolean;
+  visual?: { kind: "analogue-clock"; hourAngle: number; minuteAngle: number } | { kind: "calendar"; month: string; day: string };
 }
 
 interface AreaSignalSummary {
@@ -231,6 +265,7 @@ export class AreaGlanceCard extends LitElement {
   public hass?: HassLike;
   private _config?: AreaGlanceConfig;
   private _detail?: DetailSheet;
+  private _clockTimer?: number;
 
   static get properties() {
     return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true } };
@@ -265,6 +300,17 @@ export class AreaGlanceCard extends LitElement {
   public getCardSize() { return this._gridRows(); }
   public getGridOptions() { return { columns: 12, min_columns: 6 }; }
 
+  connectedCallback() {
+    super.connectedCallback();
+    this._clockTimer = window.setInterval(() => this.requestUpdate(), 30000);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._clockTimer !== undefined) window.clearInterval(this._clockTimer);
+    this._clockTimer = undefined;
+  }
+
   protected willUpdate(changed: PropertyValues<this>) {
     if (changed.has("hass")) this.requestUpdate();
   }
@@ -287,6 +333,7 @@ export class AreaGlanceCard extends LitElement {
 
   private _metricSource(metric: MetricConfig, preset: MetricPreset): "area" | "entity" {
     if (preset === "attention") return "area";
+    if (preset === "weather" || preset === "clock" || preset === "calendar") return "entity";
     if (preset === "lights" || (AREA_SIGNAL_PRESETS.has(preset) && preset !== "blinds")) return "area";
     return metric.source ?? (metric.entity ? "entity" : AREA_MEASUREMENT_PRESETS.has(preset) || preset === "blinds" ? "area" : "entity");
   }
@@ -442,10 +489,62 @@ export class AreaGlanceCard extends LitElement {
     return rule?.color.trim() || fallback;
   }
 
+  private _clockMetric(metric: MetricConfig, label: string, icon: string): MetricDisplay {
+    const now = new Date();
+    if (metric.clock_style === "analogue") {
+      const minutes = now.getMinutes();
+      return {
+        icon,
+        color: metric.color ?? PRESETS.clock.color,
+        value: "",
+        label,
+        visual: { kind: "analogue-clock", hourAngle: ((now.getHours() % 12) + minutes / 60) * 30, minuteAngle: minutes * 6 },
+      };
+    }
+    return { icon, color: metric.color ?? PRESETS.clock.color, value: now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }), label };
+  }
+
+  private _calendarMetric(metric: MetricConfig, label: string, icon: string): MetricDisplay {
+    const now = new Date();
+    return {
+      icon,
+      color: metric.color ?? PRESETS.calendar.color,
+      value: "",
+      label,
+      visual: { kind: "calendar", month: now.toLocaleDateString([], { month: "short" }), day: ordinal(now.getDate()) },
+    };
+  }
+
+  private _weatherMetric(metric: MetricConfig, state: EntityState, label: string, icon: string, color: string): MetricDisplay {
+    const display = metric.weather_display ?? "condition";
+    const condition = state.state;
+    const attributes = state.attributes;
+    const values: Record<NonNullable<MetricConfig["weather_display"]>, [unknown, string]> = {
+      condition: [friendlyDeviceState("weather", condition), ""],
+      temperature: [attributes.temperature ?? attributes.native_temperature, String(attributes.temperature_unit ?? attributes.native_temperature_unit ?? "")],
+      apparent_temperature: [attributes.apparent_temperature ?? attributes.native_apparent_temperature, String(attributes.temperature_unit ?? attributes.native_temperature_unit ?? "")],
+      humidity: [attributes.humidity, "%"],
+      wind_speed: [attributes.wind_speed ?? attributes.native_wind_speed, String(attributes.wind_speed_unit ?? attributes.native_wind_speed_unit ?? "")],
+    };
+    const [rawValue, unit] = values[display];
+    const number = typeof rawValue === "number" ? rawValue : typeof rawValue === "string" ? asNumber(rawValue) : undefined;
+    const value = number === undefined ? String(rawValue ?? "–") : `${number.toLocaleString(undefined, { maximumFractionDigits: metric.decimals ?? 0, minimumFractionDigits: metric.decimals ?? 0 })}${metric.show_unit === false ? "" : metric.unit ?? unit}`;
+    const defaultLabels: Partial<Record<NonNullable<MetricConfig["weather_display"]>, string>> = { temperature: "Temp", apparent_temperature: "Feels like", humidity: "Humidity", wind_speed: "Wind" };
+    const usesPresetLabel = metric.label_mode !== "custom" && metric.label_mode !== "entity" && (!metric.label || metric.label === PRESETS.weather.label);
+    return {
+      icon: metric.icon && metric.icon !== PRESETS.weather.icon ? metric.icon : WEATHER_ICONS[condition] ?? icon,
+      color: metric.color ?? weatherColor(condition, color),
+      value,
+      label: display === "condition" ? label : usesPresetLabel ? defaultLabels[display] ?? label : label,
+    };
+  }
+
   private _metric(metric: MetricConfig): MetricDisplay | undefined {
     if (metric.hidden) return undefined;
     const preset = metric.preset ?? "custom";
     const defaults = PRESETS[preset];
+    if (preset === "clock") return this._clockMetric(metric, metric.label ?? defaults.label, metric.icon ?? defaults.icon);
+    if (preset === "calendar") return this._calendarMetric(metric, metric.label ?? defaults.label, metric.icon ?? defaults.icon);
     const state = metric.entity ? this.hass?.states[metric.entity] : undefined;
     if (metric.hide_unavailable && state && UNAVAILABLE.has(state.state)) return undefined;
     const entityDomain = metric.entity?.split(".")[0];
@@ -473,6 +572,7 @@ export class AreaGlanceCard extends LitElement {
 
     if (this._metricSource(metric, preset) === "area") return this._areaMetric(metric, preset, label, icon);
     if (!state || UNAVAILABLE.has(state.state)) return { icon, color: metric.color ?? defaults.color, value: "–", label: customLabel };
+    if (preset === "weather") return this._weatherMetric(metric, state, label, icon, metric.color ?? defaults.color);
 
     const rawNumber = asNumber(state.state);
     const number = rawNumber !== undefined && preset === "power" && metric.invert_value ? -rawNumber : rawNumber;
@@ -746,8 +846,7 @@ export class AreaGlanceCard extends LitElement {
           <div class="metrics" style=${`--metric-count:${Math.max(metrics.length, 1)}`}>
             ${metrics.map(({ metric, display }) => html`
               <button class="metric" style=${`--area-glance-value-fit:${this._textFit(display.value, "value", metrics.length)};--area-glance-value-cap:${this._textContainerCap(display.value, "value")}cqi;--area-glance-label-fit:${this._textFit(display.label, "label", metrics.length)};--area-glance-label-cap:${this._textContainerCap(display.label, "label")}cqi`} aria-label=${`${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)} @contextmenu=${(event: Event) => this._metricHeld(metric, display, event)} @dblclick=${(event: Event) => this._metricDoubleTapped(metric, display, event)}>
-                ${metric.show_icon !== false ? html`<ha-icon .icon=${display.icon} style=${display.color ? `color:${display.color}` : ""}></ha-icon>` : nothing}
-                <span class="value">${display.value}</span>
+                ${display.visual?.kind === "analogue-clock" ? html`<span class="analogue-clock" style=${`--hour-angle:${display.visual.hourAngle}deg;--minute-angle:${display.visual.minuteAngle}deg;color:${display.color ?? "var(--area-glance-accent)"}`}></span>` : display.visual?.kind === "calendar" ? html`<span class="calendar-date" style=${display.color ? `color:${display.color}` : ""}><small>${display.visual.month}</small><strong>${display.visual.day}</strong></span>` : html`${metric.show_icon !== false ? html`<ha-icon .icon=${display.icon} style=${display.color ? `color:${display.color}` : ""}></ha-icon>` : nothing}<span class="value">${display.value}</span>`}
                 ${metric.show_label !== false ? html`<span class="label">${display.label}</span>` : nothing}
               </button>
             `)}
@@ -790,6 +889,13 @@ export class AreaGlanceCard extends LitElement {
     .metric { appearance:none; container-type:inline-size; border:0; border-left:1px solid color-mix(in srgb, var(--primary-text-color) 13%, transparent); background:transparent; color:var(--primary-text-color); display:flex; flex-direction:column; align-items:center; justify-content:center; min-width:0; padding:var(--area-glance-metric-padding, 3px); font:inherit; cursor:pointer; }
     .metric:hover { background:color-mix(in srgb, var(--area-glance-accent) 8%, transparent); }
     ha-icon { color:var(--area-glance-accent); width:var(--area-glance-icon-size, 24px); height:var(--area-glance-icon-size, 24px); margin-bottom:2px; flex:none; }
+    .analogue-clock { position:relative; width:calc(var(--area-glance-icon-size, 24px) + 6px); height:calc(var(--area-glance-icon-size, 24px) + 6px); margin-bottom:2px; border:2px solid currentColor; border-radius:50%; box-sizing:border-box; flex:none; }
+    .analogue-clock::before, .analogue-clock::after { content:""; position:absolute; left:50%; bottom:50%; width:2px; border-radius:2px; background:currentColor; transform-origin:50% 100%; }
+    .analogue-clock::before { height:30%; transform:translateX(-50%) rotate(var(--hour-angle)); }
+    .analogue-clock::after { height:42%; transform:translateX(-50%) rotate(var(--minute-angle)); }
+    .calendar-date { width:calc(var(--area-glance-icon-size, 24px) + 13px); min-height:calc(var(--area-glance-icon-size, 24px) + 13px); margin-bottom:2px; border:1.5px solid currentColor; border-radius:4px; overflow:hidden; display:flex; flex-direction:column; align-items:center; justify-content:center; line-height:1; flex:none; }
+    .calendar-date small { width:100%; padding:2px 0 1px; color:#fff; background:currentColor; font-size:.42em; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
+    .calendar-date strong { padding:2px 0 3px; color:currentColor; font-size:.76em; letter-spacing:-.04em; }
     .value { font-size:calc(var(--area-glance-value-size, 1.6rem) * var(--area-glance-value-fit, 1)); font-size:min(calc(var(--area-glance-value-size, 1.6rem) * var(--area-glance-value-fit, 1)), var(--area-glance-value-cap, 27cqi)); line-height:1.1; padding-block:.03em; font-weight:720; letter-spacing:-.02em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
     .label { color:var(--secondary-text-color); font-size:calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1)); font-size:min(calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1)), var(--area-glance-label-cap, 15cqi)); line-height:1.08; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; margin-top:2px; }
     .force-dark { --area-glance-card-background:#353c45; --primary-text-color:#f5f7fb; --secondary-text-color:#aeb8c7; }
@@ -1246,20 +1352,22 @@ export class AreaGlanceCardEditor extends LitElement {
         const canChooseSource = supportsArea && preset !== "attention";
         const usesArea = preset === "attention" || preset === "lights" || (preset !== "blinds" && AREA_SIGNAL_PRESETS.has(preset)) || (supportsArea && (metric.source ?? (metric.entity ? "entity" : "area")) === "area");
         const source = metric.source ?? (metric.entity ? "entity" : "area");
-        const sourceLabel = usesArea ? (preset === "attention" ? "Area health" : preset === "lights" ? "Area count" : "Area aggregate") : preset === "people_home" ? "Home zone" : "Specific entity";
+        const selfContained = preset === "clock" || preset === "calendar";
+        const requiresEntity = !usesArea && !selfContained;
+        const sourceLabel = usesArea ? (preset === "attention" ? "Area health" : preset === "lights" ? "Area count" : "Area aggregate") : selfContained ? "Live date & time" : preset === "people_home" ? "Home zone" : "Specific entity";
         const contributorHint = this._contributorHint(metric, preset, usesArea);
         const candidates = usesArea ? this._aggregateCandidates(metric, preset) : [];
         const included = new Set(includedEntityIds(metric, candidates));
         const membershipMode = metric.membership?.mode ?? "auto_except";
         const selectedAttentionTypes = new Set(attentionTypes(metric));
         const supportsThresholds = ["temperature", "humidity", "lights", "power", "battery", "co2", "pm25", "voc", "aqi"].includes(preset);
-        const supportsDecimals = AREA_MEASUREMENT_PRESETS.has(preset) || ["battery", "device", "custom"].includes(preset);
+        const supportsDecimals = AREA_MEASUREMENT_PRESETS.has(preset) || ["battery", "device", "custom", "weather"].includes(preset);
         return html`<details class="insight-editor" draggable="true" @dragstart=${(event: DragEvent) => this._dragStart(index, event)} @dragover=${(event: DragEvent) => event.preventDefault()} @drop=${(event: DragEvent) => this._dropMetric(index, event)}>
         <summary><span class="drag-handle" title="Drag to reorder">⠿</span><ha-icon .icon=${metric.icon ?? PRESETS[preset].icon}></ha-icon><span class="insight-name">${PRESETS[preset].label}</span><span class="source-pill">${sourceLabel}</span></summary>
         <div class="insight-fields"><label>What should this show?
           <select .value=${metric.preset ?? "custom"} @change=${(e: Event) => this._updateMetric(index, { preset: (e.target as HTMLSelectElement).value as MetricPreset })}>
             <optgroup label="Automatic area insights">${AUTOMATIC_METRIC_PRESETS.map((option) => html`<option value=${option}>${PRESETS[option].label}</option>`)}</optgroup>
-            <optgroup label="Home and chosen entities">${DEVICE_METRIC_PRESETS.map((option) => html`<option value=${option}>${PRESETS[option].label}</option>`)}</optgroup>
+            <optgroup label="Chosen entities and utilities">${DEVICE_METRIC_PRESETS.map((option) => html`<option value=${option}>${PRESETS[option].label}</option>`)}</optgroup>
             ${preset === "occupancy" ? html`<option value="occupancy">${PRESETS.occupancy.label}</option>` : nothing}
           </select>
         </label>
@@ -1276,7 +1384,9 @@ export class AreaGlanceCardEditor extends LitElement {
         <details class="attention-options"><summary>What needs attention</summary><label class="checkbox"><input type="checkbox" .checked=${selectedAttentionTypes.has("unavailable")} ?disabled=${selectedAttentionTypes.size === 1 && selectedAttentionTypes.has("unavailable")} @change=${(e: Event) => this._attentionTypeChanged(index, "unavailable", e)}> Unavailable entities</label><label class="checkbox"><input type="checkbox" .checked=${selectedAttentionTypes.has("updates")} ?disabled=${selectedAttentionTypes.size === 1 && selectedAttentionTypes.has("updates")} @change=${(e: Event) => this._attentionTypeChanged(index, "updates", e)}> Updates available</label><p class="slot-hint">At least one check stays enabled. Updates use Home Assistant Update entities, with compatibility for legacy update binary sensors.</p></details>` : nothing}
         ${usesArea && !(preset === "attention" && metric.attention_scope === "home") ? html`<ha-area-picker .hass=${this.hass} .value=${metric.area ?? this._config.area ?? ""} .label=${preset === "attention" ? "Area to check" : preset === "lights" ? "Area to count" : preset === "blinds" ? "Area with blinds" : "Area to summarise"} @value-changed=${(e: Event) => this._updateMetric(index, { source: "area", area: this._pickerValue(e) })}></ha-area-picker>` : nothing}
         ${usesArea && contributorHint ? html`<p class="contributor-hint">${contributorHint}</p>` : nothing}
-        ${!usesArea ? html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${preset === "custom" ? "Main text entity" : preset === "device" ? "Device or entity" : `${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>` : nothing}
+        ${requiresEntity ? html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${preset === "custom" ? "Main text entity" : preset === "device" ? "Device or entity" : `${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>` : nothing}
+        ${preset === "weather" ? html`<label>Show<select .value=${metric.weather_display ?? "condition"} @change=${(e: Event) => this._updateMetric(index, { weather_display: (e.target as HTMLSelectElement).value as NonNullable<MetricConfig["weather_display"]> })}><option value="condition">Condition</option><option value="temperature">Temperature</option><option value="apparent_temperature">Feels like</option><option value="humidity">Humidity</option><option value="wind_speed">Wind speed</option></select></label>` : nothing}
+        ${preset === "clock" ? html`<label>Clock style<select .value=${metric.clock_style ?? "digital"} @change=${(e: Event) => this._updateMetric(index, { clock_style: (e.target as HTMLSelectElement).value as NonNullable<MetricConfig["clock_style"]> })}><option value="digital">Digital</option><option value="analogue">Analogue</option></select></label>` : nothing}
         ${preset === "custom" ? html`
           <p class="slot-hint">Use one entity for the main state and another for the smaller supporting value beneath it.</p>
           <ha-entity-picker .hass=${this.hass} .value=${metric.secondary_entity ?? ""} label="Supporting value entity (optional)" allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { secondary_entity: this._pickerValue(e) || undefined })}></ha-entity-picker>
@@ -1288,7 +1398,7 @@ export class AreaGlanceCardEditor extends LitElement {
           </div>
         ` : nothing}
         <details class="more-options"><summary>Fine tuning (optional)</summary>
-          ${preset !== "custom" ? html`<label>Label source<select .value=${metric.label_mode ?? (metric.label && metric.label !== PRESETS[preset].label && !(preset === "temperature" && metric.label === "Temperature") ? "custom" : "preset")} @change=${(e: Event) => { const labelMode = (e.target as HTMLSelectElement).value as MetricConfig["label_mode"]; this._updateMetric(index, { label_mode: labelMode, ...(labelMode === "preset" ? { label: undefined } : {}) }); }}><option value="preset">Preset label</option>${!usesArea ? html`<option value="entity">Entity name</option>` : nothing}<option value="custom">Custom label</option></select></label>` : nothing}
+          ${preset !== "custom" ? html`<label>Label source<select .value=${metric.label_mode ?? (metric.label && metric.label !== PRESETS[preset].label && !(preset === "temperature" && metric.label === "Temperature") ? "custom" : "preset")} @change=${(e: Event) => { const labelMode = (e.target as HTMLSelectElement).value as MetricConfig["label_mode"]; this._updateMetric(index, { label_mode: labelMode, ...(labelMode === "preset" ? { label: undefined } : {}) }); }}><option value="preset">Preset label</option>${requiresEntity ? html`<option value="entity">Entity name</option>` : nothing}<option value="custom">Custom label</option></select></label>` : nothing}
           <div class="two"><label>${preset === "custom" ? "Supporting text fallback" : "Custom label"} <input .value=${preset === "custom" ? metric.secondary_text ?? "" : metric.label ?? ""} placeholder=${PRESETS[preset].label} @input=${(e: Event) => this._updateMetric(index, preset === "custom" ? { secondary_text: (e.target as HTMLInputElement).value || undefined } : { label_mode: "custom", label: (e.target as HTMLInputElement).value || undefined })}></label><ha-icon-picker label="Icon" .value=${metric.icon ?? ""} .placeholder=${PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon: this._pickerValue(e) })}></ha-icon-picker></div>
           ${preset === "attention" ? html`<label>Colour <input .value=${metric.color ?? ""} placeholder="var(--warning-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value || undefined })}></label><label class="checkbox"><input type="checkbox" .checked=${metric.show_icon !== false} @change=${(e: Event) => this._updateMetric(index, { show_icon: (e.target as HTMLInputElement).checked })}> Show icon</label>` : html`<div class="two"><label>${preset === "custom" ? "Fallback colour" : "Colour"} <input .value=${metric.color ?? ""} placeholder="var(--primary-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value || undefined })}></label>${supportsDecimals ? html`<label>Unit override <input .value=${metric.unit ?? ""} @input=${(e: Event) => this._updateMetric(index, { unit: (e.target as HTMLInputElement).value || undefined })}></label>` : nothing}</div>
           ${preset === "power" ? html`<label class="checkbox"><input type="checkbox" .checked=${metric.invert_value ?? false} @change=${(e: Event) => this._updateMetric(index, { invert_value: (e.target as HTMLInputElement).checked || undefined })}> Invert the power direction</label><p class="slot-hint">Use this when an import or export reading has the opposite sign to the one you want to show.</p>` : nothing}

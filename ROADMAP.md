@@ -34,7 +34,7 @@ The card is not intended to become a generic dashboard layout engine, a templati
 
 Automatic matching now covers the common area-summary signals with Home Assistant metadata rather than entity-name searches: temperature, humidity, power, COâ‚‚, particulate matter, VOC, AQI, lights, motion/presence, openings, leaks, recognised blind covers, locks, alarms, and update availability. Power accepts the official `power` device class and standard power units, retaining a narrow classless fallback for older integrations. Locks and update availability also accept their legacy binary-sensor device classes.
 
-Broader domains such as vacuum, climate, weather, cameras, and robot vacuums remain intentionally available through **A specific entity** rather than as automatic aggregates. This keeps a suggested area card dependable: finding an entity is useful, but pretending to infer the right summary policy is not.
+Broader domains such as vacuum, climate, cameras, and robot vacuums remain intentionally available through **A specific entity** rather than as automatic aggregates. A dedicated **Weather** insight is intentionally entity-led too: it provides a live condition icon plus selected current readings, but never guesses which weather provider a household prefers. Clock and Calendar date are self-contained utilities rather than area aggregates.
 
 Known limits remain explicit: Attention counts affected **entities**, not deduplicated physical devices; and no automatic smoke, gas, CO, or generic-problem aggregate is suggested until its wording and coverage rules can be made as trustworthy as Security's existing signals.
 

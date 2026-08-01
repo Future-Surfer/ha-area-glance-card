@@ -16,6 +16,9 @@ export type MetricPreset =
   | "locks"
   | "alarm"
   | "camera"
+  | "weather"
+  | "clock"
+  | "calendar"
   | "attention"
   | "leaks"
   | "people_home"
@@ -94,6 +97,10 @@ export interface MetricConfig extends ActionConfig {
   color?: string;
   /** Reverse the sign of a power reading before it is aggregated or displayed. */
   invert_value?: boolean;
+  /** The primary live value shown by a weather entity. */
+  weather_display?: "condition" | "temperature" | "apparent_temperature" | "humidity" | "wind_speed";
+  /** Clock segments can show a numeric time or a live analogue clock face. */
+  clock_style?: "digital" | "analogue";
   decimals?: number;
   unit?: string;
   show_unit?: boolean;
