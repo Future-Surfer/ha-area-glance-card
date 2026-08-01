@@ -66,8 +66,11 @@ export interface StatusConfig extends ActionConfig {
 
 export interface MetricConfig extends ActionConfig {
   preset?: MetricPreset;
-  source?: "area" | "entity";
+  /** Where this insight obtains its data. Existing cards without this field retain their current behaviour. */
+  source?: "area" | "entity" | "entities";
   entity?: string;
+  /** A deliberate group of entities, independent of Home Assistant area membership. */
+  entities?: string[];
   /** Optional second line for a custom-combination insight. */
   secondary_entity?: string;
   secondary_text?: string;
@@ -78,7 +81,7 @@ export interface MetricConfig extends ActionConfig {
   color_rules?: { state: string; color: string }[];
   /** Ordered numeric colour rules for standard measurement insights. */
   thresholds?: { above?: number; below?: number; color: string }[];
-  aggregation?: "median" | "highest" | "lowest" | "sum";
+  aggregation?: "median" | "average" | "highest" | "lowest" | "sum";
   /** Controls membership after Home Assistant metadata has identified compatible area entities. */
   membership?: {
     /** `auto_except` keeps future compatible entities included by default. */
@@ -124,12 +127,23 @@ export interface AreaGlanceConfig extends ActionConfig {
   layout?: "header" | "stacked" | "metrics-only";
   /** Text alignment is used by the title-above-insights layout. */
   header_alignment?: "left" | "center" | "right";
+  /** Leave on Auto for a layout-aware header: beside insights wraps, above insights stays compact. */
+  header_title_lines?: "auto" | "single" | "multi";
+  /** Controls whether the status and its time are kept together or shown on separate lines. */
+  header_status_lines?: "auto" | "single" | "multi";
   height?: "slim" | "compact" | "standard" | "comfortable";
   profile?: "auto" | "room" | "media" | "battery" | "energy" | "house" | "security";
   appearance?: {
     preset?: "theme" | "light" | "slate" | "charcoal" | "custom";
     background?: string;
     shadow?: boolean;
+    /** Global percentage adjustments, deliberately shared by every insight. */
+    text_scale?: {
+      title?: number;
+      status?: number;
+      value?: number;
+      label?: number;
+    };
   };
   theme?: "auto" | "light" | "dark";
   accent_color?: string;
