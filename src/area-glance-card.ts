@@ -46,7 +46,7 @@ const SLOT_HELPERS: Record<MetricPreset, string> = {
   custom: "Show an entity using its native state and unit.",
 };
 const HEIGHT_OPTIONS = {
-  slim: { contentHeight: 64, stackedContentHeight: 122, metricRowHeight: 54, rows: 1.6, stackedRows: 2.8, scale: 0.82 },
+  slim: { contentHeight: 68, stackedContentHeight: 126, metricRowHeight: 58, rows: 1.7, stackedRows: 2.9, scale: 0.82 },
   compact: { contentHeight: 78, stackedContentHeight: 140, metricRowHeight: 62, rows: 1.9, stackedRows: 3, scale: 1 },
   standard: { contentHeight: 94, stackedContentHeight: 160, metricRowHeight: 72, rows: 2.2, stackedRows: 3.4, scale: 1.15 },
   comfortable: { contentHeight: 114, stackedContentHeight: 188, metricRowHeight: 84, rows: 2.8, stackedRows: 4, scale: 1.3 },
@@ -680,16 +680,15 @@ export class AreaGlanceCard extends LitElement {
     const accent = this._config?.accent_color ? `--area-glance-accent:${this._config.accent_color};` : "";
     const scale = height.scale;
     const stacked = this._config?.layout === "stacked";
-    return `${accent}--area-glance-content-height:${stacked ? height.stackedContentHeight : height.contentHeight}px;--area-glance-metrics-height:${height.metricRowHeight}px;--area-glance-pad-y:${Math.round(8 * scale)}px;--area-glance-pad-x:${Math.round(12 * scale)}px;--area-glance-title-size:${(1.85 * scale).toFixed(2)}rem;--area-glance-status-size:${(.95 * scale).toFixed(2)}rem;--area-glance-icon-size:${Math.round(25 * scale)}px;--area-glance-value-size:${(1.75 * scale).toFixed(2)}rem;--area-glance-label-size:${(.9 * scale).toFixed(2)}rem;--area-glance-metric-padding:${Math.max(2, Math.round(3 * scale))}px;`;
+    return `${accent}--area-glance-content-height:${stacked ? height.stackedContentHeight : height.contentHeight}px;--area-glance-metrics-height:${height.metricRowHeight}px;--area-glance-pad-y:${Math.round(8 * scale)}px;--area-glance-pad-x:${Math.round(12 * scale)}px;--area-glance-title-size:${(1.85 * scale).toFixed(2)}rem;--area-glance-status-size:${(.95 * scale).toFixed(2)}rem;--area-glance-icon-size:${Math.round(25 * scale)}px;--area-glance-value-size:${(1.82 * scale).toFixed(2)}rem;--area-glance-label-size:${(.98 * scale).toFixed(2)}rem;--area-glance-metric-padding:${Math.max(1, Math.round(2 * scale))}px;`;
   }
 
-  private _textFit(text: string, type: "value" | "label", metricCount: number): number {
+  private _textFit(text: string, type: "value" | "label"): number {
     const length = Array.from(text).length;
-    const density = metricCount >= 5 ? 0.88 : metricCount === 4 ? 0.96 : 1;
     const scale = type === "value"
       ? length >= 12 ? 0.68 : length >= 9 ? 0.76 : length >= 7 ? 0.86 : 1
       : length >= 16 ? 0.65 : length >= 12 ? 0.76 : length >= 9 ? 0.86 : 1;
-    return Number((density * scale).toFixed(2));
+    return Number(scale.toFixed(2));
   }
 
   private _textContainerCap(text: string, type: "value" | "label"): number {
@@ -845,8 +844,8 @@ export class AreaGlanceCard extends LitElement {
             </div>` : nothing}
           <div class="metrics" style=${`--metric-count:${Math.max(metrics.length, 1)}`}>
             ${metrics.map(({ metric, display }) => html`
-              <button class="metric" style=${`--area-glance-value-fit:${this._textFit(display.value, "value", metrics.length)};--area-glance-value-cap:${this._textContainerCap(display.value, "value")}cqi;--area-glance-label-fit:${this._textFit(display.label, "label", metrics.length)};--area-glance-label-cap:${this._textContainerCap(display.label, "label")}cqi`} aria-label=${`${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)} @contextmenu=${(event: Event) => this._metricHeld(metric, display, event)} @dblclick=${(event: Event) => this._metricDoubleTapped(metric, display, event)}>
-                ${display.visual?.kind === "analogue-clock" ? html`<span class="analogue-clock" style=${`--hour-angle:${display.visual.hourAngle}deg;--minute-angle:${display.visual.minuteAngle}deg;color:${display.color ?? "var(--area-glance-accent)"}`}></span>` : display.visual?.kind === "calendar" ? html`<span class="calendar-date" style=${display.color ? `color:${display.color}` : ""}><small>${display.visual.month}</small><strong>${display.visual.day}</strong></span>` : html`${metric.show_icon !== false ? html`<ha-icon .icon=${display.icon} style=${display.color ? `color:${display.color}` : ""}></ha-icon>` : nothing}<span class="value">${display.value}</span>`}
+              <button class="metric" style=${`--area-glance-value-fit:${this._textFit(display.value, "value")};--area-glance-value-cap:${this._textContainerCap(display.value, "value")}cqi;--area-glance-label-fit:${this._textFit(display.label, "label")};--area-glance-label-cap:${this._textContainerCap(display.label, "label")}cqi`} aria-label=${`${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)} @contextmenu=${(event: Event) => this._metricHeld(metric, display, event)} @dblclick=${(event: Event) => this._metricDoubleTapped(metric, display, event)}>
+                ${display.visual?.kind === "analogue-clock" ? html`<span class="analogue-clock" style=${`--hour-angle:${display.visual.hourAngle}deg;--minute-angle:${display.visual.minuteAngle}deg;color:${display.color ?? "var(--area-glance-accent)"}`}></span>` : display.visual?.kind === "calendar" ? html`<span class="calendar-date" style=${display.color ? `color:${display.color}` : ""}><small>${display.visual.month}</small><strong>${display.visual.day}</strong></span>` : html`${metric.show_icon !== false && metric.preset !== "clock" ? html`<ha-icon .icon=${display.icon} style=${display.color ? `color:${display.color}` : ""}></ha-icon>` : nothing}<span class="value">${display.value}</span>`}
                 ${metric.show_label !== false ? html`<span class="label">${display.label}</span>` : nothing}
               </button>
             `)}
@@ -866,7 +865,7 @@ export class AreaGlanceCard extends LitElement {
     ha-card { overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 8%, transparent); border-radius:var(--area-glance-card-border-radius, 24px); cursor:default; background:var(--area-glance-card-background, var(--card-background-color, #fff)); box-shadow:var(--ha-card-box-shadow, 0 8px 24px rgb(0 0 0 / 18%)); }
     ha-card.clickable { cursor:pointer; }
     ha-card.no-shadow { box-shadow:none; }
-    .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:clamp(126px, 27%, 185px) minmax(0, 1fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
+    .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:clamp(112px, 25%, 168px) minmax(0, 1fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
     .layout.metrics-only { grid-template-columns:minmax(0, 1fr); }
     .layout.stacked { grid-template-columns:minmax(0, 1fr); grid-template-rows:auto minmax(var(--area-glance-metrics-height, 62px), 1fr); gap:8px; }
     .layout.stacked .summary { padding:3px 4px 0; }
@@ -886,7 +885,9 @@ export class AreaGlanceCard extends LitElement {
     .dot { width:9px; height:9px; border-radius:50%; flex:none; margin-top:3px; }
     small { display:block; font-size:inherit; }
     .metrics { min-width:0; display:grid; grid-template-columns:repeat(var(--metric-count), minmax(0, 1fr)); }
-    .metric { appearance:none; container-type:inline-size; border:0; border-left:1px solid color-mix(in srgb, var(--primary-text-color) 13%, transparent); background:transparent; color:var(--primary-text-color); display:flex; flex-direction:column; align-items:center; justify-content:center; min-width:0; padding:var(--area-glance-metric-padding, 3px); font:inherit; cursor:pointer; }
+    .metric { appearance:none; position:relative; container-type:inline-size; border:0; background:transparent; color:var(--primary-text-color); display:flex; flex-direction:column; align-items:center; justify-content:center; min-width:0; padding:var(--area-glance-metric-padding, 3px); font:inherit; cursor:pointer; }
+    .metric::before { content:""; position:absolute; left:0; top:10%; height:80%; width:1px; background:color-mix(in srgb, var(--primary-text-color) 12%, transparent); }
+    .layout.stacked .metric:first-child::before, .layout.metrics-only .metric:first-child::before { display:none; }
     .metric:hover { background:color-mix(in srgb, var(--area-glance-accent) 8%, transparent); }
     ha-icon { color:var(--area-glance-accent); width:var(--area-glance-icon-size, 24px); height:var(--area-glance-icon-size, 24px); margin-bottom:2px; flex:none; }
     .analogue-clock { position:relative; width:calc(var(--area-glance-icon-size, 24px) + 6px); height:calc(var(--area-glance-icon-size, 24px) + 6px); margin-bottom:2px; border:2px solid currentColor; border-radius:50%; box-sizing:border-box; flex:none; }
@@ -896,10 +897,10 @@ export class AreaGlanceCard extends LitElement {
     .calendar-date { width:calc(var(--area-glance-icon-size, 24px) + 13px); min-height:calc(var(--area-glance-icon-size, 24px) + 13px); margin-bottom:2px; border:1.5px solid currentColor; border-radius:4px; overflow:hidden; display:flex; flex-direction:column; align-items:center; justify-content:center; line-height:1; flex:none; }
     .calendar-date small { width:100%; padding:2px 0 1px; color:#fff; background:currentColor; font-size:.42em; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
     .calendar-date strong { padding:2px 0 3px; color:currentColor; font-size:.76em; letter-spacing:-.04em; }
-    .value { font-size:calc(var(--area-glance-value-size, 1.6rem) * var(--area-glance-value-fit, 1)); font-size:min(calc(var(--area-glance-value-size, 1.6rem) * var(--area-glance-value-fit, 1)), var(--area-glance-value-cap, 27cqi)); line-height:1.1; padding-block:.03em; font-weight:720; letter-spacing:-.02em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
-    .label { color:var(--secondary-text-color); font-size:calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1)); font-size:min(calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1)), var(--area-glance-label-cap, 15cqi)); line-height:1.08; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; margin-top:2px; }
-    .force-dark { --area-glance-card-background:#353c45; --primary-text-color:#f5f7fb; --secondary-text-color:#aeb8c7; }
-    .force-light { --area-glance-card-background:#fff; --primary-text-color:#18212e; --secondary-text-color:#667085; }
+    .value { font-size:calc(var(--area-glance-value-size, 1.6rem) * var(--area-glance-value-fit, 1)); font-size:min(calc(var(--area-glance-value-size, 1.6rem) * var(--area-glance-value-fit, 1)), var(--area-glance-value-cap, 27cqi)); line-height:1.05; padding-block:.03em; font-weight:720; letter-spacing:-.02em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+    .label { color:var(--secondary-text-color); font-size:calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1)); font-size:min(calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1)), var(--area-glance-label-cap, 15cqi)); line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; margin-top:1px; }
+    .force-dark { --area-glance-card-background:#353c45; --primary-text-color:#f5f7fb; --secondary-text-color:#c4ccd8; }
+    .force-light { --area-glance-card-background:#fff; --primary-text-color:#18212e; --secondary-text-color:#5f6b7e; }
     .detail-sheet { width:min(480px, calc(100vw - 32px)); max-height:min(70vh, 620px); padding:0; border:0; border-radius:16px; color:var(--primary-text-color); background:var(--ha-card-background, var(--card-background-color)); box-shadow:0 18px 50px rgb(0 0 0 / 28%); }
     .detail-sheet::backdrop { background:rgb(0 0 0 / 38%); }
     .detail-content { padding:20px; }
@@ -913,7 +914,7 @@ export class AreaGlanceCard extends LitElement {
     .detail-entity strong, .detail-entity small { display:block; }
     .detail-entity small { margin-top:2px; color:var(--secondary-text-color); font-size:.75rem; }
     .detail-state { color:var(--secondary-text-color); white-space:nowrap; font-size:.86rem; }
-    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:clamp(100px, 31%, 126px) minmax(0, 1fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.48rem); } .status { font-size:var(--area-glance-status-size, .85rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .label { margin-top:1px; } }
+    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:clamp(92px, 27%, 116px) minmax(0, 1fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.48rem); } .status { font-size:var(--area-glance-status-size, .85rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .label { margin-top:1px; } }
   `;
 }
 
