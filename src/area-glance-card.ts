@@ -445,11 +445,13 @@ export class AreaGlanceCard extends LitElement {
         const watts = item.value * (POWER_UNIT_FACTORS[unit] ?? 1);
         return metric.invert_value ? -watts : watts;
       }), aggregation);
-      const useKilowatts = metric.unit === "kW" || (!metric.unit && Math.abs(watts) >= 1000);
+      // Four-digit watts remain both more immediate and more compact in a
+      // narrow insight segment. Move to kW only once W would need five digits.
+      const useKilowatts = metric.unit === "kW" || (!metric.unit && Math.abs(watts) >= 10000);
       const displayed = useKilowatts ? watts / 1000 : watts;
       const decimals = metric.decimals ?? (useKilowatts ? 1 : 0);
       const unit = metric.show_unit === false ? "" : metric.unit ?? (useKilowatts ? "kW" : "W");
-      return { icon, color: this._thresholdColor(metric, displayed, color), value: `${displayed.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit}`, label, entities: values.map((item) => item.entityId), aggregate: true };
+      return { icon, color: this._thresholdColor(metric, displayed, color), value: `${displayed.toLocaleString(undefined, { useGrouping: false, maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit}`, label, entities: values.map((item) => item.entityId), aggregate: true };
     }
 
     const compatibleValues = preset === "voc"
@@ -580,7 +582,7 @@ export class AreaGlanceCard extends LitElement {
     const decimals = metric.decimals ?? (format === "temperature" ? 0 : 0);
     let value: string;
     if (number !== undefined) {
-      const rendered = number.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals });
+      const rendered = number.toLocaleString(undefined, { useGrouping: preset !== "power", maximumFractionDigits: decimals, minimumFractionDigits: decimals });
       const inferredUnit = typeof state.attributes.unit_of_measurement === "string" ? state.attributes.unit_of_measurement : "";
       const unit = metric.show_unit === false ? "" : metric.unit ?? (format === "temperature" ? "°" : format === "percent" ? "%" : inferredUnit);
       value = `${rendered}${unit}`;
@@ -680,7 +682,7 @@ export class AreaGlanceCard extends LitElement {
     const accent = this._config?.accent_color ? `--area-glance-accent:${this._config.accent_color};` : "";
     const scale = height.scale;
     const stacked = this._config?.layout === "stacked";
-    return `${accent}--area-glance-content-height:${stacked ? height.stackedContentHeight : height.contentHeight}px;--area-glance-metrics-height:${height.metricRowHeight}px;--area-glance-pad-y:${Math.round(8 * scale)}px;--area-glance-pad-x:${Math.round(12 * scale)}px;--area-glance-title-size:${(1.85 * scale).toFixed(2)}rem;--area-glance-status-size:${(.95 * scale).toFixed(2)}rem;--area-glance-icon-size:${Math.round(25 * scale)}px;--area-glance-value-size:${(1.82 * scale).toFixed(2)}rem;--area-glance-label-size:${(.98 * scale).toFixed(2)}rem;--area-glance-metric-padding:${Math.max(1, Math.round(2 * scale))}px;`;
+    return `${accent}--area-glance-content-height:${stacked ? height.stackedContentHeight : height.contentHeight}px;--area-glance-metrics-height:${height.metricRowHeight}px;--area-glance-pad-y:${Math.round(8 * scale)}px;--area-glance-pad-x:${Math.round(12 * scale)}px;--area-glance-title-size:${(1.85 * scale).toFixed(2)}rem;--area-glance-status-size:${(.95 * scale).toFixed(2)}rem;--area-glance-icon-size:${Math.round(25 * scale)}px;--area-glance-value-size:${(1.92 * scale).toFixed(2)}rem;--area-glance-label-size:${(.98 * scale).toFixed(2)}rem;--area-glance-metric-padding:${Math.max(1, Math.round(2 * scale))}px;`;
   }
 
   private _textFit(text: string, type: "value" | "label"): number {
@@ -693,12 +695,12 @@ export class AreaGlanceCard extends LitElement {
 
   private _textContainerCap(text: string, type: "value" | "label"): number {
     const length = Math.max(1, Array.from(text).length);
-    const max = type === "value" ? 27 : 15;
-    const min = type === "value" ? 12 : 10;
+    const max = type === "value" ? 34 : 15;
+    const min = type === "value" ? 14 : 10;
     // A value's available width falls quickly when a slim band has four or
     // five segments. Scale the container-relative cap by its characters so
     // common words such as "Triggered" can shrink before they are ellipsised.
-    const characterBudget = type === "value" ? 160 : 110;
+    const characterBudget = type === "value" ? 200 : 110;
     return Number(Math.max(min, Math.min(max, characterBudget / length)).toFixed(2));
   }
 
@@ -865,7 +867,7 @@ export class AreaGlanceCard extends LitElement {
     ha-card { overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 8%, transparent); border-radius:var(--area-glance-card-border-radius, 24px); cursor:default; background:var(--area-glance-card-background, var(--card-background-color, #fff)); box-shadow:var(--ha-card-box-shadow, 0 8px 24px rgb(0 0 0 / 18%)); }
     ha-card.clickable { cursor:pointer; }
     ha-card.no-shadow { box-shadow:none; }
-    .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:clamp(112px, 25%, 168px) minmax(0, 1fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
+    .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:clamp(108px, 23%, 152px) minmax(0, 1fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
     .layout.metrics-only { grid-template-columns:minmax(0, 1fr); }
     .layout.stacked { grid-template-columns:minmax(0, 1fr); grid-template-rows:auto minmax(var(--area-glance-metrics-height, 62px), 1fr); gap:8px; }
     .layout.stacked .summary { padding:3px 4px 0; }
@@ -914,7 +916,7 @@ export class AreaGlanceCard extends LitElement {
     .detail-entity strong, .detail-entity small { display:block; }
     .detail-entity small { margin-top:2px; color:var(--secondary-text-color); font-size:.75rem; }
     .detail-state { color:var(--secondary-text-color); white-space:nowrap; font-size:.86rem; }
-    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:clamp(92px, 27%, 116px) minmax(0, 1fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.48rem); } .status { font-size:var(--area-glance-status-size, .85rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .label { margin-top:1px; } }
+    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:clamp(88px, 25%, 108px) minmax(0, 1fr); padding:7px 8px; } .title { font-size:min(var(--area-glance-title-size, 1.8rem), 1.48rem); } .status { font-size:var(--area-glance-status-size, .85rem); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .label { margin-top:1px; } }
   `;
 }
 
