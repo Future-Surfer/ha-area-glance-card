@@ -40,6 +40,8 @@ Broader domains such as climate and cameras remain intentionally available throu
 
 Known limits remain explicit: Attention counts affected **entities**, not deduplicated physical devices; and no automatic smoke, gas, CO, or generic-problem aggregate is suggested until its wording and coverage rules can be made as trustworthy as Security's existing signals.
 
+Camera previews can be used individually or via the Cameras profile, which selects up to three feeds and keeps one lower-resolution feed per physical camera device where resolution metadata is available. It must never let native camera dimensions alter insight widths. More ambitious camera grids and automatic camera discovery rules remain deliberately out of scope until this constrained presentation has been proven reliable across Home Assistant layouts and the Card Lab.
+
 ## Roadmap
 
 ### 1. Insight arranging workflow

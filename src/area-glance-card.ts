@@ -13,6 +13,42 @@ const DEFAULT_ENERGY_METRICS: MetricConfig[] = [
   { ...presetMetric("battery"), energy_source: "battery_soc", label: "Battery" },
   { ...presetMetric("power"), energy_source: "battery_power", label: "Battery flow", icon: "mdi:battery-charging-medium" },
 ];
+/** Select a compact, non-duplicated set of camera feeds for the Cameras profile. */
+const cameraProfileMetrics = (hass?: HassLike): MetricConfig[] => {
+  const cameras = Object.keys(hass?.states ?? {})
+    .filter((entityId) => entityId.startsWith("camera."))
+    .map((entityId) => {
+      const attributes = hass?.states[entityId]?.attributes ?? {};
+      const width = Number(attributes.width ?? attributes.image_width ?? 0);
+      const height = Number(attributes.height ?? attributes.image_height ?? 0);
+      const resolution = typeof attributes.resolution === "string" ? attributes.resolution.match(/(\d+)\s*[x×]\s*(\d+)/i) : undefined;
+      const pixels = width > 0 && height > 0 ? width * height : resolution ? Number(resolution[1]) * Number(resolution[2]) : Number.POSITIVE_INFINITY;
+      const deviceId = hass?.entities?.[entityId]?.device_id ?? `entity:${entityId}`;
+      return { entityId, deviceId, pixels };
+    })
+    .sort((a, b) => a.pixels - b.pixels || a.entityId.localeCompare(b.entityId));
+  const seenDevices = new Set<string>();
+  return cameras.filter((camera) => {
+    if (seenDevices.has(camera.deviceId)) return false;
+    seenDevices.add(camera.deviceId);
+    return true;
+  }).slice(0, 3).map(({ entityId }) => ({
+    ...presetMetric("camera"),
+    source: "entity" as const,
+    entity: entityId,
+    camera_display: "feed" as const,
+    action: "more-info" as const,
+  }));
+};
+const defaultMetricsForProfile = (profile: AreaGlanceConfig["profile"], hass?: HassLike): MetricConfig[] => {
+  if (profile === "security") return DEFAULT_SECURITY_METRICS;
+  if (profile === "energy") return DEFAULT_ENERGY_METRICS;
+  if (profile === "cameras") {
+    const metrics = cameraProfileMetrics(hass);
+    return metrics.length ? metrics : [presetMetric("camera")];
+  }
+  return DEFAULT_METRICS;
+};
 const AREA_SIGNAL_PRESETS = new Set<MetricPreset>(["motion", "presence", "doors", "windows", "blinds", "locks", "leaks"]);
 const AREA_MEASUREMENT_PRESETS = new Set<MetricPreset>(["temperature", "humidity", "power", "co2", "pm25", "voc", "aqi"]);
 const AUTOMATIC_METRIC_PRESETS: MetricPreset[] = ["temperature", "humidity", "lights", "power", "co2", "pm25", "voc", "aqi", "motion", "presence", "doors", "windows", "blinds", "locks", "attention", "leaks"];
@@ -43,7 +79,7 @@ const SLOT_HELPERS: Record<MetricPreset, string> = {
   locks: "Count locks in an area that are unlocked or need attention.",
   attention: "Show unavailable entities and updates that need attention in an area or across the whole home.",
   alarm: "Show the state of one Home Assistant alarm control panel.",
-  camera: "Show one chosen camera's state. Use its action to open a dedicated camera view.",
+  camera: "Show one chosen camera's state, or use the whole insight slot for its Home Assistant camera preview.",
   vacuum: "Show one robot vacuum with a state-aware icon and colour, or choose its battery or fan speed.",
   weather: "Show one Weather entity with a live condition icon, or one of its current readings.",
   clock: "Show the current local time as a digital readout or an analogue clock face.",
@@ -284,7 +320,7 @@ interface MetricDisplay {
   showLabel?: boolean;
   entities?: string[];
   aggregate?: boolean;
-  visual?: { kind: "analogue-clock"; hourAngle: number; minuteAngle: number } | { kind: "calendar"; month: string; day: string };
+  visual?: { kind: "analogue-clock"; hourAngle: number; minuteAngle: number } | { kind: "calendar"; month: string; day: string } | { kind: "camera"; src: string; alt: string };
 }
 
 interface DisplayValueParts {
@@ -364,15 +400,12 @@ export class AreaGlanceCard extends LitElement {
   }
 
   public setConfig(config: AreaGlanceConfig): void {
-    if (!config || (!config.title && !config.area && config.profile !== "house" && config.profile !== "security" && config.layout !== "metrics-only")) {
-      throw new Error("Set a title, choose an area, use the House or Security profile, or use Metrics only.");
+    if (!config || (!config.title && !config.area && config.profile !== "house" && config.profile !== "security" && config.profile !== "cameras" && config.layout !== "metrics-only")) {
+      throw new Error("Set a title, choose an area, use a Home, Security, or Cameras profile, or use Metrics only.");
     }
     this._config = {
       ...config,
-      metrics: config.metrics?.length
-        ? config.metrics
-        : config.profile === "security" ? DEFAULT_SECURITY_METRICS
-          : config.profile === "energy" ? DEFAULT_ENERGY_METRICS : DEFAULT_METRICS,
+      metrics: config.metrics?.length ? config.metrics : defaultMetricsForProfile(config.profile, this.hass),
     };
     this._loadEnergyPreferences();
   }
@@ -482,6 +515,7 @@ export class AreaGlanceCard extends LitElement {
     if (profile === "house") return "mdi:home-outline";
     if (profile === "energy" || profile === "battery") return "mdi:lightning-bolt-outline";
     if (profile === "security") return "mdi:shield-home-outline";
+    if (profile === "cameras") return "mdi:cctv";
     const name = `${title} ${this._areaName(this._config?.area) ?? ""}`.toLowerCase();
     if (/(living|lounge)/.test(name)) return "mdi:sofa-outline";
     if (/(bed|sleep)/.test(name)) return "mdi:bed-outline";
@@ -738,6 +772,19 @@ export class AreaGlanceCard extends LitElement {
     };
   }
 
+  private _cameraMetric(metric: MetricConfig, entityId: string, state: EntityState, label: string, icon: string, color: string): MetricDisplay {
+    const picture = state.attributes.entity_picture;
+    if (metric.camera_display !== "feed" || typeof picture !== "string" || !picture.trim()) {
+      return { icon, color, value: this.hass?.formatEntityState?.(state) ?? friendlyState(state.state), label };
+    }
+    // Camera entity pictures are Home Assistant proxy URLs. Refresh a static
+    // image at most every 30 seconds without bypassing Home Assistant
+    // authentication or depending on internal UI components.
+    const separator = picture.includes("?") ? "&" : "?";
+    const refreshKey = Math.floor(Date.now() / 30000);
+    return { icon, color, value: "", label, showIcon: false, showLabel: false, visual: { kind: "camera", src: `${picture}${separator}area_glance=${refreshKey}`, alt: label || entityId } };
+  }
+
   private _metric(metric: MetricConfig): MetricDisplay | undefined {
     if (metric.hidden) return undefined;
     if (metric.energy_source) return this._energyMetric(metric);
@@ -777,6 +824,7 @@ export class AreaGlanceCard extends LitElement {
     }
     if (!state || UNAVAILABLE.has(state.state)) return { icon, color: metric.color ?? defaults.color, value: "–", label: customLabel };
     if (preset === "weather") return this._weatherMetric(metric, state, label, icon, metric.color ?? defaults.color);
+    if (preset === "camera") return this._cameraMetric(metric, metric.entity!, state, label, icon, metric.color ?? defaults.color);
     if (preset === "vacuum") return this._vacuumMetric(metric, state, label, icon, metric.color ?? defaults.color);
 
     const rawNumber = asNumber(state.state);
@@ -1321,7 +1369,7 @@ export class AreaGlanceCard extends LitElement {
     const status = this._status();
     const metrics = (this._config.metrics ?? []).map((metric) => ({ metric, display: this._metric(metric) })).filter((entry): entry is { metric: MetricConfig; display: MetricDisplay } => Boolean(entry.display));
     const title = this._config.title
-      ?? (this._config.profile === "house" ? "House" : this._config.profile === "security" ? "Security" : this._config.profile === "energy" ? "Energy" : this._areaName(this._config.area))
+      ?? (this._config.profile === "house" ? "House" : this._config.profile === "security" ? "Security" : this._config.profile === "energy" ? "Energy" : this._config.profile === "cameras" ? "Cameras" : this._areaName(this._config.area))
       ?? "Area";
     const showHeader = this._config.layout !== "metrics-only";
     const headerAlignment = this._config.layout === "stacked" || this._config.layout === "tower" ? this._config.header_alignment ?? "left" : "left";
@@ -1347,10 +1395,11 @@ export class AreaGlanceCard extends LitElement {
           <div class="metrics" style=${`--metric-count:${Math.max(metrics.length, 1)}`}>
             ${metrics.map(({ metric, display }) => {
               const valueParts = splitDisplayUnit(display.value);
+              const cameraVisual = display.visual?.kind === "camera" ? display.visual : undefined;
               return html`
-                <button class="metric" style=${`--area-glance-value-fit:${this._textFit(valueParts.primary, "value")};--area-glance-value-cap:${this._textContainerCap(valueParts.primary, "value")}cqi;--area-glance-unit-fit:${this._unitFit(valueParts.primary, valueParts.unit)};--area-glance-label-fit:${this._textFit(display.label, "label")};--area-glance-label-cap:${this._textContainerCap(display.label, "label")}cqi`} aria-label=${`${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)} @pointerdown=${(event: PointerEvent) => this._metricPointerDown(metric, display, event)} @pointermove=${(event: PointerEvent) => this._metricPointerMove(event)} @pointerup=${(event: PointerEvent) => this._metricPointerUp(event)} @pointercancel=${() => this._cancelMetricGesture()} @contextmenu=${(event: Event) => event.preventDefault()} @keydown=${(event: KeyboardEvent) => this._metricKeyDown(metric, display, event)}>
-                  ${display.visual?.kind === "analogue-clock" ? html`<span class="analogue-clock" style=${`--hour-angle:${display.visual.hourAngle}deg;--minute-angle:${display.visual.minuteAngle}deg;color:${display.color ?? "var(--area-glance-accent)"}`}></span>` : display.visual?.kind === "calendar" ? html`<span class="calendar-date" style=${display.color ? `color:${display.color}` : ""}><small>${display.visual.month}</small><strong>${display.visual.day}</strong></span>` : html`${metric.show_icon !== false && metric.preset !== "clock" ? html`<ha-icon .icon=${display.icon} style=${display.color ? `color:${display.color}` : ""}></ha-icon>` : nothing}<span class="value"><span class="value-primary">${valueParts.primary}</span>${valueParts.unit ? html`<span class="value-unit">${valueParts.unit}</span>` : nothing}</span>`}
-                  ${metric.show_label !== false ? html`<span class="label">${display.label}</span>` : nothing}
+                <button class=${`metric${cameraVisual ? " camera-feed" : ""}`} style=${`--area-glance-value-fit:${this._textFit(valueParts.primary, "value")};--area-glance-value-cap:${this._textContainerCap(valueParts.primary, "value")}cqi;--area-glance-unit-fit:${this._unitFit(valueParts.primary, valueParts.unit)};--area-glance-label-fit:${this._textFit(display.label, "label")};--area-glance-label-cap:${this._textContainerCap(display.label, "label")}cqi`} aria-label=${cameraVisual ? `Open ${cameraVisual.alt}` : `${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)} @pointerdown=${(event: PointerEvent) => this._metricPointerDown(metric, display, event)} @pointermove=${(event: PointerEvent) => this._metricPointerMove(event)} @pointerup=${(event: PointerEvent) => this._metricPointerUp(event)} @pointercancel=${() => this._cancelMetricGesture()} @contextmenu=${(event: Event) => event.preventDefault()} @keydown=${(event: KeyboardEvent) => this._metricKeyDown(metric, display, event)}>
+                  ${cameraVisual ? html`<img class="camera-preview" src=${cameraVisual.src} alt=${cameraVisual.alt}>` : display.visual?.kind === "analogue-clock" ? html`<span class="analogue-clock" style=${`--hour-angle:${display.visual.hourAngle}deg;--minute-angle:${display.visual.minuteAngle}deg;color:${display.color ?? "var(--area-glance-accent)"}`}></span>` : display.visual?.kind === "calendar" ? html`<span class="calendar-date" style=${display.color ? `color:${display.color}` : ""}><small>${display.visual.month}</small><strong>${display.visual.day}</strong></span>` : html`${metric.show_icon !== false && metric.preset !== "clock" ? html`<ha-icon .icon=${display.icon} style=${display.color ? `color:${display.color}` : ""}></ha-icon>` : nothing}<span class="value"><span class="value-primary">${valueParts.primary}</span>${valueParts.unit ? html`<span class="value-unit">${valueParts.unit}</span>` : nothing}</span>`}
+                  ${!cameraVisual && metric.show_label !== false ? html`<span class="label">${display.label}</span>` : nothing}
                 </button>
               `;
             })}
@@ -1428,6 +1477,12 @@ export class AreaGlanceCard extends LitElement {
     small { display:block; font-size:inherit; }
     .metrics { min-width:0; display:grid; grid-template-columns:repeat(var(--metric-count), minmax(0, 1fr)); }
     .metric { appearance:none; position:relative; container-type:inline-size; border:0; background:transparent; color:var(--primary-text-color); display:flex; flex-direction:column; align-items:center; justify-content:center; min-width:0; padding:var(--area-glance-metric-padding, 3px); font:inherit; cursor:pointer; touch-action:manipulation; }
+    /* The grid owns camera-slot width. A camera's native aspect ratio may only
+       decide what gets cropped inside that fixed rectangle, never the width of
+       a neighbouring insight. */
+    .metric.camera-feed { display:block; align-self:stretch; width:100%; min-width:0; max-width:100%; height:100%; min-height:0; overflow:hidden; padding:0; }
+    .layout.tower .metric.camera-feed { display:block; padding:0; }
+    .camera-preview { display:block; width:100%; max-width:100%; height:100%; min-height:0; object-fit:cover; object-position:center; background:var(--secondary-background-color); }
     .metric::before { content:""; position:absolute; left:0; top:10%; height:80%; width:1px; background:color-mix(in srgb, var(--primary-text-color) 12%, transparent); }
     .regular-weight .title { font-weight:650; letter-spacing:-.024em; }
     .regular-weight .status { font-weight:430; }
@@ -1541,7 +1596,7 @@ export class AreaGlanceCardEditor extends LitElement {
 
   static get properties() { return { hass: { attribute: false }, _config: { state: true }, _suggestionsNeedUpdate: { state: true } }; }
   public setConfig(config: AreaGlanceConfig) {
-    this._config = { ...config, metrics: config.metrics?.length ? config.metrics : config.profile === "energy" ? DEFAULT_ENERGY_METRICS : DEFAULT_METRICS };
+    this._config = { ...config, metrics: config.metrics?.length ? config.metrics : defaultMetricsForProfile(config.profile, this.hass) };
   }
 
   private _change(change: Partial<AreaGlanceConfig>) {
@@ -1616,10 +1671,11 @@ export class AreaGlanceCardEditor extends LitElement {
     if (profile === "security") return "security";
     if (profile === "energy") return "energy";
     if (profile === "battery") return "battery";
+    if (profile === "cameras") return "cameras";
     return "area";
   }
-  private _purposeSelected(purpose: "area" | "house" | "energy" | "battery" | "security") {
-    if (purpose === "house" || purpose === "security" || purpose === "energy") {
+  private _purposeSelected(purpose: "area" | "house" | "energy" | "battery" | "security" | "cameras") {
+    if (purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "cameras") {
       this._populateAreaPreset("", purpose);
       return;
     }
@@ -1729,6 +1785,18 @@ export class AreaGlanceCardEditor extends LitElement {
         title: this._config.layout === "metrics-only" ? this._config.title : "Energy",
         status: undefined,
         metrics: DEFAULT_ENERGY_METRICS.map((metric) => ({ ...metric })),
+      });
+      return;
+    }
+    if (profile === "cameras") {
+      this._suggestionsNeedUpdate = false;
+      const metrics = cameraProfileMetrics(this.hass);
+      this._change({
+        area: undefined,
+        profile: "cameras",
+        title: this._config.layout === "metrics-only" ? this._config.title : "Cameras",
+        status: undefined,
+        metrics: metrics.length ? metrics : [presetMetric("camera")],
       });
       return;
     }
@@ -2120,9 +2188,9 @@ export class AreaGlanceCardEditor extends LitElement {
       <section class="setup">
         <span class="section-label">What does this card show?</span>
         <div class="purpose-grid">
-          ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"], ["security", "Security", "Home security"] ] as const).map(([value, title, description]) => html`<button class="purpose ${value === "security" ? "security" : ""} ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
+          ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"], ["security", "Security", "Home security"], ["cameras", "Cameras", "Live camera feeds"] ] as const).map(([value, title, description]) => html`<button class="purpose ${value === "security" || value === "cameras" ? "security" : ""} ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
         </div>
-        ${purpose === "house" || purpose === "security" || purpose === "energy" ? html`<p class="applied">${purpose === "energy" ? "System-wide live insights come from the Energy Dashboard setup. If it is not configured, add your own entity insights below." : purpose === "security" ? "Whole-home security suggestions are applied." : "Whole-home suggestions are applied."} You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._config.area ?? ""} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
+        ${purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "cameras" ? html`<p class="applied">${purpose === "energy" ? "System-wide live insights come from the Energy Dashboard setup. If it is not configured, add your own entity insights below." : purpose === "security" ? "Whole-home security suggestions are applied." : purpose === "cameras" ? "Up to three feeds are selected: one lower-resolution camera per device where Home Assistant exposes that information." : "Whole-home suggestions are applied."} You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._config.area ?? ""} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
       </section>
       <section class="insights"><h3>Insights</h3><p class="hint">Keep up to five. They resize automatically to fit the card.</p>
       ${metrics.map((metric, index) => {
@@ -2178,6 +2246,7 @@ export class AreaGlanceCardEditor extends LitElement {
         ${requiresEntity ? html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${preset === "custom" ? "Main text entity" : preset === "device" ? "Device or entity" : preset === "vacuum" ? "Robot vacuum" : `${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>` : nothing}
         ${preset === "weather" ? html`<label>Show<select .value=${metric.weather_display ?? "condition"} @change=${(e: Event) => this._updateMetric(index, { weather_display: (e.target as HTMLSelectElement).value as NonNullable<MetricConfig["weather_display"]> })}><option value="condition">Condition</option><option value="temperature">Temperature</option><option value="apparent_temperature">Feels like</option><option value="humidity">Humidity</option><option value="wind_speed">Wind speed</option></select></label>` : nothing}
         ${preset === "vacuum" ? html`<label>Show<select .value=${metric.vacuum_display ?? "state"} @change=${(e: Event) => this._updateMetric(index, { vacuum_display: (e.target as HTMLSelectElement).value as NonNullable<MetricConfig["vacuum_display"]> })}><option value="state">Activity state</option><option value="battery">Battery level</option><option value="fan_speed">Fan speed</option></select></label>` : nothing}
+        ${preset === "camera" ? html`<label>Camera display<select .value=${metric.camera_display ?? "state"} @change=${(e: Event) => this._updateMetric(index, { camera_display: (e.target as HTMLSelectElement).value as NonNullable<MetricConfig["camera_display"]> })}><option value="state">Compact state</option><option value="feed">Full-slot camera preview</option></select></label><p class="slot-hint">Preview uses the camera image supplied by Home Assistant and fills the whole insight slot. Its tap action remains available.</p>` : nothing}
         ${preset === "clock" ? html`<label>Clock style<select .value=${metric.clock_style ?? "digital"} @change=${(e: Event) => this._updateMetric(index, { clock_style: (e.target as HTMLSelectElement).value as NonNullable<MetricConfig["clock_style"]> })}><option value="digital">Digital</option><option value="analogue">Analogue</option></select></label>` : nothing}
         ${preset === "custom" ? html`
           <p class="slot-hint">Use one entity for the main state and another for the smaller supporting value beneath it.</p>

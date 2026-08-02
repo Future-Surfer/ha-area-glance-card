@@ -26,6 +26,13 @@ url: /hacsfiles/ha-area-glance-card/area-glance-card.js
 type: module
 ```
 
+## Supported insights
+
+- **Comfort & air:** temperature, humidity, CO₂, PM2.5, VOC, AQI, weather.
+- **Home activity:** lights, power, battery, motion, presence, people home, doors, windows, blinds, locks, leaks, security, Attention.
+- **Devices & utilities:** media or other chosen devices, robot vacuums, cameras (including full-slot previews), clocks, calendar date, and Custom combinations.
+- **Profiles:** automatic area, Whole home, Energy Dashboard, Home battery, Security, and Cameras (up to three cropped previews, one per camera device).
+
 ## What it can show
 
 For areas, automatic suggestions include temperature, humidity, lights, live power, CO₂, PM2.5, VOC, AQI, motion, presence, doors, windows, blinds, locks, leaks, and Attention (unavailable entities or updates). Matching favours Home Assistant domains, device classes, and units—not loose entity-name matching.

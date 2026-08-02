@@ -120,6 +120,8 @@ export interface MetricConfig extends ActionConfig {
   weather_display?: "condition" | "temperature" | "apparent_temperature" | "humidity" | "wind_speed";
   /** Robot vacuum segments can prioritise the activity state, charge, or chosen cleaning mode. */
   vacuum_display?: "state" | "battery" | "fan_speed";
+  /** Camera segments can remain compact or use the entire insight slot for the live preview. */
+  camera_display?: "state" | "feed";
   /** Clock segments can show a numeric time or a live analogue clock face. */
   clock_style?: "digital" | "analogue";
   decimals?: number;
@@ -150,7 +152,7 @@ export interface AreaGlanceConfig extends ActionConfig {
   /** Controls whether the status and its time are kept together or shown on separate lines. */
   header_status_lines?: "auto" | "single" | "multi";
   height?: "slim" | "compact" | "standard" | "comfortable";
-  profile?: "auto" | "room" | "media" | "battery" | "energy" | "house" | "security";
+  profile?: "auto" | "room" | "media" | "battery" | "energy" | "house" | "security" | "cameras";
   appearance?: {
     preset?: "theme" | "light" | "slate" | "charcoal" | "custom";
     /** Shared typography weight for the title and insight text. */
