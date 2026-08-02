@@ -1,4 +1,6 @@
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
+import { dispatchHassAction, type ActionTrigger } from "./actions";
+import { areaEntityIds } from "./area-index";
 import { PRESETS, presetMetric } from "./presets";
 import type { ActionConfig, AreaGlanceConfig, AreaSignal, EntityState, HassLike, MetricConfig, MetricPreset, StatusConfig } from "./types";
 
@@ -316,6 +318,9 @@ export class AreaGlanceCard extends LitElement {
   private _config?: AreaGlanceConfig;
   private _detail?: DetailSheet;
   private _clockTimer?: number;
+  private _metricGesture?: { pointerId: number; metric: MetricConfig; display: MetricDisplay; startX: number; startY: number; held: boolean; timer?: number };
+  private _pendingMetricTap?: { metric: MetricConfig; display: MetricDisplay; timer: number };
+  private _ignoreMetricClick = false;
 
   static get properties() {
     return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true } };
@@ -377,6 +382,9 @@ export class AreaGlanceCard extends LitElement {
     super.disconnectedCallback();
     if (this._clockTimer !== undefined) window.clearInterval(this._clockTimer);
     this._clockTimer = undefined;
+    this._cancelMetricGesture();
+    if (this._pendingMetricTap) window.clearTimeout(this._pendingMetricTap.timer);
+    this._pendingMetricTap = undefined;
   }
 
   protected willUpdate(changed: PropertyValues<this>) {
@@ -389,14 +397,7 @@ export class AreaGlanceCard extends LitElement {
   }
 
   private _areaEntities(area: string | undefined, domain?: string): string[] {
-    if (!this.hass) return [];
-    return Object.keys(this.hass.states).filter((entityId) => {
-      if (domain && !entityId.startsWith(`${domain}.`)) return false;
-      if (!area) return true;
-      const entity = this.hass?.entities?.[entityId];
-      const deviceArea = entity?.device_id ? this.hass?.devices?.[entity.device_id]?.area_id : undefined;
-      return entity?.area_id === area || deviceArea === area;
-    });
+    return areaEntityIds(this.hass, area, domain);
   }
 
   private _metricSource(metric: MetricConfig, preset: MetricPreset): "area" | "entity" | "entities" {
@@ -827,7 +828,7 @@ export class AreaGlanceCard extends LitElement {
     return Math.max(0.34, Number(fit.toFixed(2)));
   }
 
-  private _runAction(action?: ActionConfig, fallbackEntity?: string) {
+  private _runAction(action?: ActionConfig, fallbackEntity?: string, trigger: ActionTrigger = "tap") {
     const config = action ?? this._config;
     const kind = config?.action ?? "more-info";
     const entity = config?.entity ?? fallbackEntity;
@@ -837,21 +838,15 @@ export class AreaGlanceCard extends LitElement {
       this._openAreaDetails();
       return;
     }
-    if (kind === "more-info" && entity) {
-      this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId: entity }, bubbles: true, composed: true }));
-    } else if (kind === "navigate" && config?.navigation_path) {
-      history.pushState(null, "", config.navigation_path);
-      window.dispatchEvent(new Event("location-changed"));
-    } else if (kind === "toggle" && entity) {
-      this.hass?.callService?.("homeassistant", "toggle", { entity_id: entity });
-    } else if (kind === "call-service" && config?.service) {
-      const [domain, service] = config.service.split(".");
-      if (domain && service) this.hass?.callService?.(domain, service, config.data);
-    }
+    // Home Assistant owns standard action semantics; local sheets remain in
+    // the card because they describe Area Glance's aggregate contributors.
+    dispatchHassAction(this, { ...config, action: kind, ...(entity ? { entity } : {}) }, fallbackEntity, trigger);
   }
 
   private _entityName(entityId: string) {
-    return String(this.hass?.states[entityId]?.attributes.friendly_name ?? entityId);
+    const state = this.hass?.states[entityId];
+    return state && this.hass?.formatEntityName?.(state, undefined)
+      || String(state?.attributes.friendly_name ?? entityId);
   }
 
   private _entityState(entityId: string) {
@@ -903,27 +898,76 @@ export class AreaGlanceCard extends LitElement {
     };
   }
 
-  private _metricAction(metric: MetricConfig, display: MetricDisplay, action?: ActionConfig, fallback = false) {
+  private _metricAction(metric: MetricConfig, display: MetricDisplay, action?: ActionConfig, fallback = false, trigger: ActionTrigger = "tap") {
     if (action?.action === "metric-details") {
       this._openMetricDetails(metric, display);
       return;
     }
     if (action?.action && (action.action !== "more-info" || Boolean(action.entity ?? metric.entity))) {
-      this._runAction(action, metric.entity);
+      this._runAction(action, metric.entity, trigger);
       return;
     }
     if (!fallback) return;
     const preset = metric.preset ?? "custom";
     if (this._metricSource(metric, preset) !== "entity") this._openMetricDetails(metric, display);
-    else this._runAction(metric, metric.entity);
+    else this._runAction(metric, metric.entity, trigger);
   }
 
   private _metricClicked(metric: MetricConfig, display: MetricDisplay, event: Event) {
     event.stopPropagation();
+    if (this._ignoreMetricClick) return;
     this._metricAction(metric, display, metric, true);
   }
-  private _metricHeld(metric: MetricConfig, display: MetricDisplay, event: Event) { event.preventDefault(); event.stopPropagation(); this._metricAction(metric, display, metric.hold_action); }
-  private _metricDoubleTapped(metric: MetricConfig, display: MetricDisplay, event: Event) { event.preventDefault(); event.stopPropagation(); this._metricAction(metric, display, metric.double_tap_action); }
+  private _suppressMetricClick() { this._ignoreMetricClick = true; window.setTimeout(() => { this._ignoreMetricClick = false; }, 0); }
+  private _metricPointerDown(metric: MetricConfig, display: MetricDisplay, event: PointerEvent) {
+    if (event.button !== 0) return;
+    const target = event.currentTarget as HTMLElement;
+    target.setPointerCapture?.(event.pointerId);
+    this._metricGesture?.timer && window.clearTimeout(this._metricGesture.timer);
+    const gesture: NonNullable<typeof this._metricGesture> = { pointerId: event.pointerId, metric, display, startX: event.clientX, startY: event.clientY, held: false };
+    gesture.timer = window.setTimeout(() => {
+      if (this._metricGesture !== gesture) return;
+      gesture.held = true;
+      this._suppressMetricClick();
+      this._metricAction(metric, display, metric.hold_action, false, "hold");
+    }, 500);
+    this._metricGesture = gesture;
+  }
+  private _metricPointerMove(event: PointerEvent) {
+    const gesture = this._metricGesture;
+    if (!gesture || gesture.pointerId !== event.pointerId || gesture.held) return;
+    if (Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) > 12) this._cancelMetricGesture();
+  }
+  private _metricPointerUp(event: PointerEvent) {
+    const gesture = this._metricGesture;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    this._cancelMetricGesture();
+    this._suppressMetricClick();
+    if (gesture.held) return;
+    if (this._pendingMetricTap) {
+      window.clearTimeout(this._pendingMetricTap.timer);
+      const pending = this._pendingMetricTap;
+      this._pendingMetricTap = undefined;
+      this._metricAction(pending.metric, pending.display, pending.metric.double_tap_action, false, "double_tap");
+      return;
+    }
+    this._pendingMetricTap = { ...gesture, timer: window.setTimeout(() => {
+      const pending = this._pendingMetricTap;
+      this._pendingMetricTap = undefined;
+      if (pending) this._metricAction(pending.metric, pending.display, pending.metric, true, "tap");
+    }, 250) };
+  }
+  private _cancelMetricGesture() {
+    if (this._metricGesture?.timer) window.clearTimeout(this._metricGesture.timer);
+    this._metricGesture = undefined;
+  }
+  private _metricKeyDown(metric: MetricConfig, display: MetricDisplay, event: KeyboardEvent) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    event.stopPropagation();
+    this._suppressMetricClick();
+    this._metricAction(metric, display, metric, true, "tap");
+  }
 
   private _headerClicked() { this._runAction(this._config?.header_action ?? this._config); }
   private _statusClicked(event: Event) {
@@ -974,7 +1018,7 @@ export class AreaGlanceCard extends LitElement {
             ${metrics.map(({ metric, display }) => {
               const valueParts = splitDisplayUnit(display.value);
               return html`
-                <button class="metric" style=${`--area-glance-value-fit:${this._textFit(valueParts.primary, "value")};--area-glance-value-cap:${this._textContainerCap(valueParts.primary, "value")}cqi;--area-glance-unit-fit:${this._unitFit(valueParts.primary, valueParts.unit)};--area-glance-label-fit:${this._textFit(display.label, "label")};--area-glance-label-cap:${this._textContainerCap(display.label, "label")}cqi`} aria-label=${`${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)} @contextmenu=${(event: Event) => this._metricHeld(metric, display, event)} @dblclick=${(event: Event) => this._metricDoubleTapped(metric, display, event)}>
+                <button class="metric" style=${`--area-glance-value-fit:${this._textFit(valueParts.primary, "value")};--area-glance-value-cap:${this._textContainerCap(valueParts.primary, "value")}cqi;--area-glance-unit-fit:${this._unitFit(valueParts.primary, valueParts.unit)};--area-glance-label-fit:${this._textFit(display.label, "label")};--area-glance-label-cap:${this._textContainerCap(display.label, "label")}cqi`} aria-label=${`${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)} @pointerdown=${(event: PointerEvent) => this._metricPointerDown(metric, display, event)} @pointermove=${(event: PointerEvent) => this._metricPointerMove(event)} @pointerup=${(event: PointerEvent) => this._metricPointerUp(event)} @pointercancel=${() => this._cancelMetricGesture()} @contextmenu=${(event: Event) => event.preventDefault()} @keydown=${(event: KeyboardEvent) => this._metricKeyDown(metric, display, event)}>
                   ${display.visual?.kind === "analogue-clock" ? html`<span class="analogue-clock" style=${`--hour-angle:${display.visual.hourAngle}deg;--minute-angle:${display.visual.minuteAngle}deg;color:${display.color ?? "var(--area-glance-accent)"}`}></span>` : display.visual?.kind === "calendar" ? html`<span class="calendar-date" style=${display.color ? `color:${display.color}` : ""}><small>${display.visual.month}</small><strong>${display.visual.day}</strong></span>` : html`${metric.show_icon !== false && metric.preset !== "clock" ? html`<ha-icon .icon=${display.icon} style=${display.color ? `color:${display.color}` : ""}></ha-icon>` : nothing}<span class="value"><span class="value-primary">${valueParts.primary}</span>${valueParts.unit ? html`<span class="value-unit">${valueParts.unit}</span>` : nothing}</span>`}
                   ${metric.show_label !== false ? html`<span class="label">${display.label}</span>` : nothing}
                 </button>
@@ -1031,7 +1075,7 @@ export class AreaGlanceCard extends LitElement {
     .dot { width:9px; height:9px; border-radius:50%; flex:none; margin-top:3px; }
     small { display:block; font-size:inherit; }
     .metrics { min-width:0; display:grid; grid-template-columns:repeat(var(--metric-count), minmax(0, 1fr)); }
-    .metric { appearance:none; position:relative; container-type:inline-size; border:0; background:transparent; color:var(--primary-text-color); display:flex; flex-direction:column; align-items:center; justify-content:center; min-width:0; padding:var(--area-glance-metric-padding, 3px); font:inherit; cursor:pointer; }
+    .metric { appearance:none; position:relative; container-type:inline-size; border:0; background:transparent; color:var(--primary-text-color); display:flex; flex-direction:column; align-items:center; justify-content:center; min-width:0; padding:var(--area-glance-metric-padding, 3px); font:inherit; cursor:pointer; touch-action:manipulation; }
     .metric::before { content:""; position:absolute; left:0; top:10%; height:80%; width:1px; background:color-mix(in srgb, var(--primary-text-color) 12%, transparent); }
     .layout.stacked .metric:first-child::before, .layout.metrics-only .metric:first-child::before { display:none; }
     .layout.tower .metric { display:grid; grid-template-columns:calc(var(--area-glance-icon-size, 24px) + 10px) minmax(0, 1fr); grid-template-rows:auto auto; column-gap:8px; justify-content:start; align-content:center; text-align:left; padding-inline:8px; }
@@ -1077,6 +1121,10 @@ export class AreaGlanceCardEditor extends LitElement {
   private _config: AreaGlanceConfig = { title: "Area", metrics: DEFAULT_METRICS };
   private _suggestionsNeedUpdate = false;
   private _draggedMetricIndex?: number;
+  private _dragOverMetricIndex?: number;
+  private _draggedMetricHeight = 0;
+  /** Original row centres captured before any preview transforms are applied. */
+  private _dragMetricMidpoints: { index: number; midpoint: number }[] = [];
 
   static get properties() { return { hass: { attribute: false }, _config: { state: true }, _suggestionsNeedUpdate: { state: true } }; }
   public setConfig(config: AreaGlanceConfig) {
@@ -1195,13 +1243,7 @@ export class AreaGlanceCardEditor extends LitElement {
     return this.hass?.areas?.[area]?.name ?? area.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
   }
   private _entitiesInArea(area: string): string[] {
-    if (!this.hass) return [];
-    if (!area) return Object.keys(this.hass.states);
-    return Object.keys(this.hass.states).filter((entityId) => {
-      const entity = this.hass?.entities?.[entityId];
-      const deviceArea = entity?.device_id ? this.hass?.devices?.[entity.device_id]?.area_id : undefined;
-      return entity?.area_id === area || deviceArea === area;
-    });
+    return areaEntityIds(this.hass, area);
   }
   private _sourceForEditor(metric: MetricConfig, preset: MetricPreset): "area" | "entity" | "entities" {
     if (preset === "attention") return "area";
@@ -1225,7 +1267,10 @@ export class AreaGlanceCardEditor extends LitElement {
     return entities.filter((entityId) => isAreaMeasurement(preset, entityId, this.hass?.states[entityId]));
   }
   private _entityName(entityId: string): string {
-    const name = this.hass?.states[entityId]?.attributes.friendly_name;
+    const state = this.hass?.states[entityId];
+    const formatted = state && this.hass?.formatEntityName?.(state, undefined);
+    if (formatted) return formatted;
+    const name = state?.attributes.friendly_name;
     return typeof name === "string" && name.trim() ? name : entityId.replace(/^[^.]+\./, "").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
   }
   private _contributorHint(metric: MetricConfig, preset: MetricPreset, usesArea: boolean): string | undefined {
@@ -1457,19 +1502,70 @@ export class AreaGlanceCardEditor extends LitElement {
     this._change({ metrics });
   }
   private _dragStart(index: number, event: DragEvent) {
+    event.stopPropagation();
     this._draggedMetricIndex = index;
+    this._dragOverMetricIndex = undefined;
+    const source = (event.currentTarget as HTMLElement).closest<HTMLElement>(".insight-editor");
+    const next = source?.nextElementSibling as HTMLElement | null;
+    const previous = source?.previousElementSibling as HTMLElement | null;
+    // Include the editor's inter-row gap, otherwise shifted neighbours would
+    // overlap the translucent source row during the live preview.
+    this._draggedMetricHeight = next ? next.offsetTop - source!.offsetTop
+      : previous ? source!.offsetTop - previous.offsetTop
+        : source?.offsetHeight ?? 0;
+    this._dragMetricMidpoints = source ? Array.from(source.parentElement!.querySelectorAll<HTMLElement>(":scope > .insight-editor"))
+      .map((row, rowIndex) => {
+        const bounds = row.getBoundingClientRect();
+        return { index: rowIndex, midpoint: bounds.top + bounds.height / 2 };
+      }) : [];
     event.dataTransfer?.setData("text/plain", String(index));
-    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.dropEffect = "move";
+    }
+    this.requestUpdate();
+  }
+  private _dragOver(event: DragEvent) {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    if (this._draggedMetricIndex === undefined || !this._dragMetricMidpoints.length) return;
+    const target = this._dragMetricMidpoints.reduce((nearest, candidate) =>
+      Math.abs(candidate.midpoint - event.clientY) < Math.abs(nearest.midpoint - event.clientY) ? candidate : nearest,
+    ).index;
+    const nextTarget = target === this._draggedMetricIndex ? undefined : target;
+    if (nextTarget === this._dragOverMetricIndex) return;
+    this._dragOverMetricIndex = nextTarget;
+    this.requestUpdate();
+  }
+  private _dragEnd() {
+    this._draggedMetricIndex = undefined;
+    this._dragOverMetricIndex = undefined;
+    this._draggedMetricHeight = 0;
+    this._dragMetricMidpoints = [];
+    this.requestUpdate();
   }
   private _dropMetric(index: number, event: DragEvent) {
     event.preventDefault();
     const from = this._draggedMetricIndex ?? Number(event.dataTransfer?.getData("text/plain"));
     this._draggedMetricIndex = undefined;
+    this._dragOverMetricIndex = undefined;
+    this._draggedMetricHeight = 0;
+    this._dragMetricMidpoints = [];
     if (!Number.isInteger(from) || from === index || from < 0) return;
     const metrics = [...(this._config.metrics ?? [])];
     const [moved] = metrics.splice(from, 1);
     metrics.splice(index, 0, moved);
     this._change({ metrics });
+  }
+  /** Shift surrounding rows into the source row's space without moving the
+   * active draggable element in the DOM (which would cancel native dragging). */
+  private _dragShift(index: number): number {
+    const from = this._draggedMetricIndex;
+    const to = this._dragOverMetricIndex;
+    if (from === undefined || to === undefined || !this._draggedMetricHeight) return 0;
+    if (from < to && index > from && index <= to) return -this._draggedMetricHeight;
+    if (to < from && index >= to && index < from) return this._draggedMetricHeight;
+    return 0;
   }
   private _metricAction(metric: MetricConfig, trigger: "tap" | "hold" | "double"): ActionConfig | undefined {
     return trigger === "tap" ? metric : trigger === "hold" ? metric.hold_action : metric.double_tap_action;
@@ -1592,8 +1688,8 @@ export class AreaGlanceCardEditor extends LitElement {
           ? [["", "Automatic"], ["W", "Watts (W)"], ["kW", "Kilowatts (kW)"], ["MW", "Megawatts (MW)"]]
           : isTemperatureDisplay ? [["", "Home Assistant default"], ["°C", "Celsius (°C)"], ["°F", "Fahrenheit (°F)"]]
             : undefined;
-        return html`<details class="insight-editor" draggable="true" @dragstart=${(event: DragEvent) => this._dragStart(index, event)} @dragover=${(event: DragEvent) => event.preventDefault()} @drop=${(event: DragEvent) => this._dropMetric(index, event)}>
-        <summary><span class="drag-handle" title="Drag to reorder">⠿</span><ha-icon .icon=${metric.icon ?? PRESETS[preset].icon}></ha-icon><span class="insight-name">${PRESETS[preset].label}</span><span class="source-pill">${sourceLabel}</span></summary>
+        return html`<details class="insight-editor ${this._draggedMetricIndex === index ? "dragging" : ""} ${this._dragOverMetricIndex === index ? "drag-over" : ""}" style=${`--reorder-shift:${this._dragShift(index)}px`} @dragover=${(event: DragEvent) => this._dragOver(event)} @drop=${(event: DragEvent) => this._dropMetric(index, event)}>
+        <summary><span class="drag-handle" draggable="true" role="img" aria-label="Drag insight to reorder" title="Drag to reorder" @click=${(event: Event) => { event.preventDefault(); event.stopPropagation(); }} @dragstart=${(event: DragEvent) => this._dragStart(index, event)} @dragend=${this._dragEnd}>⠿</span><ha-icon .icon=${metric.icon ?? PRESETS[preset].icon}></ha-icon><span class="insight-name">${PRESETS[preset].label}</span><span class="source-pill">${sourceLabel}</span></summary>
         <div class="insight-fields"><label>What should this show?
           <select .value=${metric.preset ?? "custom"} @change=${(e: Event) => this._updateMetric(index, { preset: (e.target as HTMLSelectElement).value as MetricPreset })}>
             <optgroup label="Automatic area insights">${AUTOMATIC_METRIC_PRESETS.map((option) => html`<option value=${option}>${PRESETS[option].label}</option>`)}</optgroup>
@@ -1684,7 +1780,7 @@ export class AreaGlanceCardEditor extends LitElement {
     </div>`;
   }
   static styles = css`
-    :host { display:block; } .editor { padding:12px; } h3 { margin:0; } .hint, .slot-hint, .contributor-hint { color:var(--secondary-text-color); margin:4px 0 12px; } .slot-hint, .contributor-hint { font-size:.88rem; } .contributor-hint { padding:7px 9px; border-radius:6px; background:color-mix(in srgb, var(--primary-color) 7%, var(--card-background-color)); } label { display:block; font-weight:500; margin:12px 0; } ha-entity-picker, ha-area-picker { display:block; margin:12px 0; } input, select { box-sizing:border-box; width:100%; padding:8px; margin-top:4px; font:inherit; color:inherit; background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:6px; } button { cursor:pointer; font:inherit; } .setup, .insights { margin-top:18px; } .section-label { display:block; font-weight:600; margin-bottom:8px; } .purpose-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; } .purpose { text-align:left; min-height:62px; padding:10px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; } .purpose.selected { border:2px solid var(--primary-color); background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .purpose strong, .purpose small { display:block; } .purpose small { color:var(--secondary-text-color); font-size:.78rem; margin-top:3px; } .applied { color:var(--secondary-text-color); font-size:.9rem; margin:8px 0; } .suggestion-update { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:10px; margin-top:8px; border-radius:8px; background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .suggestion-update span { font-size:.88rem; } .primary, .add { padding:8px 12px; color:white; background:var(--primary-color); border:0; border-radius:6px; white-space:nowrap; } .advanced-setup, .settings, .insight-editor { border:1px solid var(--divider-color); border-radius:8px; padding:10px; margin-top:12px; } summary { cursor:pointer; font-weight:600; } .advanced-setup summary, .settings summary, .header-fine-tuning summary, .more-options summary, .thresholds summary, .metric-actions summary, .secondary-actions summary { color:var(--secondary-text-color); } .header-fine-tuning { margin-top:12px; padding:10px; border:1px solid var(--divider-color); border-radius:8px; } .header-fine-tuning .slot-hint { margin-bottom:4px; } .insight-editor { padding:0; overflow:hidden; } .insight-editor > summary { display:flex; align-items:center; gap:8px; padding:12px; list-style:none; } .insight-editor > summary::-webkit-details-marker { display:none; } .insight-editor > summary::after { content:"›"; margin-left:auto; color:var(--secondary-text-color); font-size:1.4rem; } .insight-editor[open] > summary::after { transform:rotate(90deg); } .insight-editor ha-icon { width:22px; height:22px; color:var(--primary-color); } .drag-handle { color:var(--secondary-text-color); cursor:grab; font-size:1.15rem; letter-spacing:-2px; } .insight-name { min-width:0; flex:1; } .source-pill { padding:3px 6px; border-radius:999px; color:var(--secondary-text-color); background:color-mix(in srgb, var(--secondary-text-color) 12%, transparent); font-size:.72rem; white-space:nowrap; } .insight-fields { padding:0 12px 12px; border-top:1px solid var(--divider-color); } .more-options, .thresholds, .metric-actions, .secondary-actions { margin-top:12px; } .thresholds, .metric-actions { padding:10px; border:1px solid var(--divider-color); border-radius:8px; } .two { display:grid; grid-template-columns:1fr 1fr; gap:8px; } .three { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:8px; align-items:end; } .checkbox { font-weight:400; } .checkbox input { width:auto; margin:0 6px 0 0; vertical-align:middle; } .threshold { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)) auto; gap:8px; align-items:end; margin-top:8px; } .threshold label { margin:0; } .insight-actions, .reorder { display:flex; align-items:center; gap:8px; } .insight-actions { justify-content:space-between; } .reorder button { padding:5px 7px; border:1px solid var(--divider-color); border-radius:5px; color:var(--primary-text-color); background:transparent; } .reorder button:disabled { opacity:.45; cursor:default; } .remove { padding:6px 0; color:var(--error-color); background:transparent; border:0; } .add { margin-top:12px; } @media (max-width:400px) { .purpose-grid, .two, .three, .threshold { grid-template-columns:1fr; } .suggestion-update { align-items:flex-start; flex-direction:column; } }
+    :host { display:block; } .editor { padding:12px; } h3 { margin:0; } .hint, .slot-hint, .contributor-hint { color:var(--secondary-text-color); margin:4px 0 12px; } .slot-hint, .contributor-hint { font-size:.88rem; } .contributor-hint { padding:7px 9px; border-radius:6px; background:color-mix(in srgb, var(--primary-color) 7%, var(--card-background-color)); } label { display:block; font-weight:500; margin:12px 0; } ha-entity-picker, ha-area-picker { display:block; margin:12px 0; } input, select { box-sizing:border-box; width:100%; padding:8px; margin-top:4px; font:inherit; color:inherit; background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:6px; } button { cursor:pointer; font:inherit; } .setup, .insights { margin-top:18px; } .section-label { display:block; font-weight:600; margin-bottom:8px; } .purpose-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; } .purpose { text-align:left; min-height:62px; padding:10px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; } .purpose.selected { border:2px solid var(--primary-color); background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .purpose strong, .purpose small { display:block; } .purpose small { color:var(--secondary-text-color); font-size:.78rem; margin-top:3px; } .applied { color:var(--secondary-text-color); font-size:.9rem; margin:8px 0; } .suggestion-update { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:10px; margin-top:8px; border-radius:8px; background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .suggestion-update span { font-size:.88rem; } .primary, .add { padding:8px 12px; color:white; background:var(--primary-color); border:0; border-radius:6px; white-space:nowrap; } .advanced-setup, .settings, .insight-editor { border:1px solid var(--divider-color); border-radius:8px; padding:10px; margin-top:12px; } summary { cursor:pointer; font-weight:600; } .advanced-setup summary, .settings summary, .header-fine-tuning summary, .more-options summary, .thresholds summary, .metric-actions summary, .secondary-actions summary { color:var(--secondary-text-color); } .header-fine-tuning { margin-top:12px; padding:10px; border:1px solid var(--divider-color); border-radius:8px; } .header-fine-tuning .slot-hint { margin-bottom:4px; } .insight-editor { padding:0; overflow:hidden; transform:translateY(var(--reorder-shift, 0)); transition:transform 170ms ease, opacity .15s ease, box-shadow .15s ease, border-color .15s ease; will-change:transform; } .insight-editor.dragging { opacity:.22; } .insight-editor.drag-over { border-color:var(--primary-color); box-shadow:0 0 0 2px color-mix(in srgb, var(--primary-color) 24%, transparent); } .insight-editor > summary { display:flex; align-items:center; gap:8px; padding:12px; list-style:none; } .insight-editor > summary::-webkit-details-marker { display:none; } .insight-editor > summary::after { content:"›"; margin-left:auto; color:var(--secondary-text-color); font-size:1.4rem; } .insight-editor[open] > summary::after { transform:rotate(90deg); } .insight-editor ha-icon { width:22px; height:22px; color:var(--primary-color); } .drag-handle { display:inline-grid; place-items:center; width:26px; min-height:32px; margin:-8px 0 -8px -6px; border-radius:5px; color:var(--secondary-text-color); cursor:grab; font-size:1.15rem; letter-spacing:-2px; touch-action:none; user-select:none; } .drag-handle:hover { color:var(--primary-color); background:color-mix(in srgb, var(--primary-color) 9%, transparent); } .drag-handle:active { cursor:grabbing; } .insight-name { min-width:0; flex:1; } .source-pill { padding:3px 6px; border-radius:999px; color:var(--secondary-text-color); background:color-mix(in srgb, var(--secondary-text-color) 12%, transparent); font-size:.72rem; white-space:nowrap; } .insight-fields { padding:0 12px 12px; border-top:1px solid var(--divider-color); } .more-options, .thresholds, .metric-actions, .secondary-actions { margin-top:12px; } .thresholds, .metric-actions { padding:10px; border:1px solid var(--divider-color); border-radius:8px; } .two { display:grid; grid-template-columns:1fr 1fr; gap:8px; } .three { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:8px; align-items:end; } .checkbox { font-weight:400; } .checkbox input { width:auto; margin:0 6px 0 0; vertical-align:middle; } .threshold { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)) auto; gap:8px; align-items:end; margin-top:8px; } .threshold label { margin:0; } .insight-actions, .reorder { display:flex; align-items:center; gap:8px; } .insight-actions { justify-content:space-between; } .reorder button { padding:5px 7px; border:1px solid var(--divider-color); border-radius:5px; color:var(--primary-text-color); background:transparent; } .reorder button:disabled { opacity:.45; cursor:default; } .remove { padding:6px 0; color:var(--error-color); background:transparent; border:0; } .add { margin-top:12px; } @media (max-width:400px) { .purpose-grid, .two, .three, .threshold { grid-template-columns:1fr; } .suggestion-update { align-items:flex-start; flex-direction:column; } }
     .purpose.security { grid-column:span 2; }
     .custom-rules { margin:14px 0; padding:10px; border:1px solid var(--divider-color); border-radius:8px; }
     .custom-rules .slot-hint { margin-bottom:8px; }

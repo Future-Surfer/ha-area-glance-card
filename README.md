@@ -19,6 +19,22 @@ type: custom:area-glance-card
 area: living_room
 ```
 
+Three useful starting points are just as small:
+
+```yaml
+# Whole-home energy summary
+type: custom:area-glance-card
+profile: energy
+
+# One explicit entity, without automatic matching
+type: custom:area-glance-card
+title: Air quality
+metrics:
+  - preset: custom
+    entity: sensor.office_co2
+    label_mode: entity
+```
+
 ## What it can show
 
 Automatic area insights include temperature, humidity, lights on/total, summed power, CO₂, PM2.5, VOC, AQI, motion, room presence, doors, windows, blinds, locks, leaks, and Attention (unavailable entities or available updates). Area matching prefers Home Assistant domains, device classes, and units—not just names.
@@ -63,6 +79,12 @@ url: /hacsfiles/ha-area-glance-card/area-glance-card.js
 type: module
 ```
 
+## Automatic matching and troubleshooting
+
+Automatic insights use Home Assistant domains, device classes, and measurement units before considering an entity name. Assign devices or entities to an area in Home Assistant for room-level summaries. Leave the area blank for a whole-home aggregate, then use **Exclude entities from this home** to remove a known outlier.
+
+If an expected entity is absent, first check that it is assigned to the intended area and exposes the expected device class/unit. Choose **A specific entity** or **Selected entities** when that device is intentionally exceptional. An aggregate’s contributor sheet shows exactly what is currently included.
+
 ## Development
 
-Run `npm install`, `npm run check`, then `npm run build`. Commit the generated [area-glance-card.js](area-glance-card.js) with source changes.
+Run `npm install`, `npm run check`, then `npm run build`. Commit the generated [area-glance-card.js](area-glance-card.js) with source changes. See [architecture notes](docs/architecture.md) before extending automatic matching or actions.

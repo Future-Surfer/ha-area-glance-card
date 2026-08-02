@@ -24,6 +24,8 @@ The card is not intended to become a generic dashboard layout engine, a templati
 - Automatic temperature, humidity, lights, live power, CO₂, PM2.5, VOC, AQI, motion, presence, doors, windows, and leak summaries.
 - Strict measurement matching for automatic numeric area insights, with a narrow legacy fallback for classless CO₂ sensors.
 - Header and status actions, plus contributor detail sheets for aggregates.
+- Standard Home Assistant `hass-action` dispatch with touch-safe tap, hold, and double-tap recognition for insight segments.
+- Cached area/domain entity discovery shared by the card and visual editor, so a card resolves its insights without repeatedly scanning the full Home Assistant state collection.
 - Automatic blind summaries use Home Assistant cover device classes; blinds, shades, shutters, and curtains are included while garage and door covers remain separate.
 - Aggregate insights and area-based header statuses support automatic exclusions, while keeping compatibility checks and contributor sheets truthful.
 - An optional Attention insight reports unavailable entities and available updates for an area or the whole home.

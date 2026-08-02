@@ -41,6 +41,8 @@ export interface HassLike {
   entities?: Record<string, { area_id?: string; device_id?: string }>;
   devices?: Record<string, { area_id?: string }>;
   areas?: Record<string, { name?: string }>;
+  /** Available in newer Home Assistant frontends; callers retain a friendly-name fallback. */
+  formatEntityName?: (state: EntityState, name?: unknown, options?: { separator?: string }) => string;
   formatEntityState?: (state: EntityState) => string;
   callService?: (domain: string, service: string, data?: Record<string, unknown>) => Promise<unknown>;
 }
