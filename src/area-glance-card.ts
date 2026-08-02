@@ -311,6 +311,10 @@ interface DetailSheet {
   subtitle: string;
   entities: string[];
   emptyMessage: string;
+  /** Aggregate sheets can offer a deliberately small set of safe quick controls. */
+  quickControls?: boolean;
+  /** Lights get a deliberately richer control panel; other aggregates remain compact. */
+  lightControlPanel?: boolean;
 }
 
 export class AreaGlanceCard extends LitElement {
@@ -865,11 +869,14 @@ export class AreaGlanceCard extends LitElement {
     const area = metric.area ?? this._config?.area;
     const attention = metric.preset === "attention";
     const wholeHomeAttention = attention && metric.attention_scope === "home";
+    const lightControlPanel = metric.preset === "lights" && display.aggregate === true;
     this._detail = {
       title: display.label,
-      subtitle: attention ? wholeHomeAttention ? "Checked across your home" : `Checked in ${this._areaName(area) ?? "this area"}` : area ? `Included from ${this._areaName(area) ?? "this area"}` : "Included entities",
+      subtitle: attention ? wholeHomeAttention ? "Checked across your home" : `Checked in ${this._areaName(area) ?? "this area"}` : lightControlPanel ? this._areaName(area) ?? "Your home" : area ? `Included from ${this._areaName(area) ?? "this area"}` : "Included entities",
       entities: display.entities ?? [],
       emptyMessage: attention ? "No entities currently need attention for the selected checks." : "No compatible entities are currently contributing to this insight.",
+      quickControls: display.aggregate === true,
+      lightControlPanel,
     };
   }
 
@@ -980,6 +987,94 @@ export class AreaGlanceCard extends LitElement {
     }
     this._runAction(status, status.entity);
   }
+
+  private _openEntityDetails(entityId: string) {
+    this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId }, bubbles: true, composed: true }));
+    this._closeDetail();
+  }
+
+  /**
+   * The sheet intentionally offers only predictable binary controls. Rich
+   * device controls belong in Home Assistant's normal more-info dialog.
+   */
+  private _quickControl(entityId: string): { domain: string; service: "turn_on" | "turn_off"; isOn: boolean } | undefined {
+    const state = this.hass?.states[entityId];
+    if (!state || UNAVAILABLE.has(state.state)) return undefined;
+    const domain = entityId.split(".")[0];
+    if (!domain || !["light", "switch", "fan", "input_boolean"].includes(domain)) return undefined;
+    if (state.state !== "on" && state.state !== "off") return undefined;
+    const service = state.state === "on" ? "turn_off" : "turn_on";
+    return { domain, service, isOn: state.state === "on" };
+  }
+
+  private _lightDetailIcon(entityId: string): string {
+    const state = this.hass?.states[entityId];
+    const configured = state?.attributes.icon;
+    if (typeof configured === "string" && configured.startsWith("mdi:")) return configured;
+    const name = `${entityId} ${state?.attributes.friendly_name ?? ""}`.toLowerCase();
+    if (/co2.*(led|indicator)|indicator/.test(name)) return "mdi:molecule-co2";
+    if (/(strip|led)/.test(name)) return "mdi:led-strip-variant";
+    if (/(ceiling|overhead|pendant|chandelier)/.test(name)) return "mdi:ceiling-light";
+    if (/(printer|print)/.test(name)) return "mdi:printer";
+    if (/(indicator|status)/.test(name)) return "mdi:lightbulb-outline";
+    return state?.state === "on" ? "mdi:lightbulb" : "mdi:lightbulb-outline";
+  }
+
+  private _lightDetailDescription(entityId: string): string {
+    const state = this.hass?.states[entityId];
+    const name = `${entityId} ${state?.attributes.friendly_name ?? ""}`.toLowerCase();
+    if (/co2.*(led|indicator)|indicator/.test(name)) return "CO₂ indicator";
+    if (/(strip|led)/.test(name)) return "LED strip";
+    if (/(ceiling|overhead|pendant|chandelier)/.test(name)) return "Ceiling light";
+    if (/(printer|print)/.test(name)) return "Printer light";
+    if (/(indicator|status)/.test(name)) return "Status indicator";
+    const modes = state?.attributes.supported_color_modes;
+    if (Array.isArray(modes) && modes.some((mode) => ["xy", "hs", "rgb", "rgbw", "rgbww"].includes(String(mode)))) return "Colour light";
+    if (Array.isArray(modes) && modes.includes("brightness")) return "Dimmable light";
+    return "Light";
+  }
+
+  private _lightEntityIds(detail: DetailSheet): string[] {
+    return detail.entities.filter((entityId) => entityId.startsWith("light.") && this.hass?.states[entityId]);
+  }
+
+  private async _runQuickControl(event: Event, entityId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    const control = this._quickControl(entityId);
+    if (!control || !this.hass?.callService) return;
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    try {
+      await this.hass.callService(control.domain, control.service, { entity_id: entityId });
+    } catch (error) {
+      // Home Assistant remains the source of truth; preserve the sheet and
+      // leave a useful diagnostic for frontend/service failures.
+      console.error("Area Glance quick control failed", error);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  private async _runAllLightsControl(event: Event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const detail = this._detail;
+    if (!detail) return;
+    const entityIds = this._lightEntityIds(detail).filter((entityId) => this._quickControl(entityId)?.domain === "light");
+    if (!entityIds.length || !this.hass?.callService) return;
+    const service = entityIds.some((entityId) => this.hass?.states[entityId]?.state === "on") ? "turn_off" : "turn_on";
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    try {
+      await this.hass.callService("light", service, { entity_id: entityIds });
+    } catch (error) {
+      console.error("Area Glance all-lights control failed", error);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   private _closeDetail() { this._detail = undefined; }
 
   protected updated(changed: PropertyValues<this>) {
@@ -1028,10 +1123,22 @@ export class AreaGlanceCard extends LitElement {
         </section>
       </ha-card>
       <dialog class="detail-sheet" @close=${this._closeDetail} @click=${(event: Event) => { if (event.target === event.currentTarget) this._closeDetail(); }}>
-        ${this._detail ? html`<div class="detail-content">
+        ${this._detail ? (() => {
+          const lightEntities = this._detail.lightControlPanel ? this._lightEntityIds(this._detail) : [];
+          const lightsOn = lightEntities.filter((entityId) => this.hass?.states[entityId]?.state === "on").length;
+          const allLightsActive = lightsOn > 0;
+          return html`<div class="detail-content ${this._detail.lightControlPanel ? "light-control-panel" : ""}">
           <div class="detail-heading"><div><h2>${this._detail.title}</h2><p>${this._detail.subtitle}</p></div><button class="detail-close" aria-label="Close" @click=${this._closeDetail}>×</button></div>
-          ${this._detail.entities.length ? html`<div class="detail-entities">${this._detail.entities.map((entityId) => html`<button class="detail-entity" @click=${() => { this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId }, bubbles: true, composed: true })); this._closeDetail(); }}><span><strong>${this._entityName(entityId)}</strong><small>${entityId}</small></span><span class="detail-state">${this._entityState(entityId)}</span></button>`)}</div>` : html`<p class="detail-empty">${this._detail.emptyMessage}</p>`}
-        </div>` : nothing}
+          ${this._detail.lightControlPanel && lightEntities.length ? html`<div class="detail-count"><span class="detail-count-dot"></span>${lightsOn} of ${lightEntities.length} on</div><div class="detail-all-lights"><span class="detail-icon-badge active"><ha-icon icon="mdi:lightbulb-group-outline"></ha-icon></span><span class="detail-all-copy"><strong>All lights</strong><small>Turn all on or off</small></span><button class="detail-control ${allLightsActive ? "active" : ""}" role="switch" aria-checked=${String(allLightsActive)} aria-label=${allLightsActive ? "Some lights are on. Turn all lights off" : "All lights are off. Turn all lights on"} @click=${this._runAllLightsControl}><span class="detail-toggle-thumb"></span></button></div>` : nothing}
+          ${this._detail.entities.length ? html`<div class="detail-entities">${this._detail.entities.map((entityId) => {
+            const control = this._detail?.quickControls ? this._quickControl(entityId) : undefined;
+            const name = this._entityName(entityId);
+            const state = this._entityState(entityId);
+            const lightRow = this._detail?.lightControlPanel === true && entityId.startsWith("light.");
+            return html`<div class="detail-entity ${lightRow ? "detail-light-entity" : ""}">${lightRow ? html`<span class="detail-icon-badge ${control?.isOn ? "active" : ""}"><ha-icon icon=${this._lightDetailIcon(entityId)}></ha-icon></span>` : nothing}<button class="detail-entity-main" aria-label=${`${name}: ${state}. Show details`} @click=${() => this._openEntityDetails(entityId)}><span><strong>${name}</strong><small>${lightRow ? this._lightDetailDescription(entityId) : entityId}</small></span>${control ? nothing : html`<span class="detail-state">${state}</span>`}</button>${control ? html`<button class="detail-control ${control.isOn ? "active" : ""}" role="switch" aria-checked=${String(control.isOn)} aria-label=${`${name} is ${control.isOn ? "on" : "off"}. Toggle`} @click=${(event: Event) => this._runQuickControl(event, entityId)}><span class="detail-toggle-thumb"></span></button>` : nothing}</div>`;
+          })}</div>` : html`<p class="detail-empty">${this._detail.emptyMessage}</p>`}
+        </div>`;
+        })() : nothing}
       </dialog>`;
   }
 
@@ -1099,19 +1206,51 @@ export class AreaGlanceCard extends LitElement {
     .label { color:var(--secondary-text-color); font-size:calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1) * var(--area-glance-label-scale, 1)); font-size:min(calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1) * var(--area-glance-label-scale, 1)), var(--area-glance-label-cap, 15cqi)); line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; margin-top:1px; }
     .force-dark { --area-glance-card-background:#353c45; --primary-text-color:#f5f7fb; --secondary-text-color:#c4ccd8; }
     .force-light { --area-glance-card-background:#fff; --primary-text-color:#18212e; --secondary-text-color:#5f6b7e; }
-    .detail-sheet { width:min(480px, calc(100vw - 32px)); max-height:min(70vh, 620px); padding:0; border:0; border-radius:16px; color:var(--primary-text-color); background:var(--ha-card-background, var(--card-background-color)); box-shadow:0 18px 50px rgb(0 0 0 / 28%); }
-    .detail-sheet::backdrop { background:rgb(0 0 0 / 38%); }
-    .detail-content { padding:20px; }
+    .detail-sheet { width:min(560px, calc(100vw - 32px)); max-height:min(78vh, 720px); padding:0; border:0; border-radius:22px; color:var(--primary-text-color); background:var(--ha-card-background, var(--card-background-color)); box-shadow:0 18px 50px rgb(0 0 0 / 28%); overflow:hidden; }
+    .detail-sheet::backdrop { background:rgb(0 0 0 / 30%); backdrop-filter:blur(8px); }
+    .detail-content { padding:20px; overflow:hidden; }
     .detail-heading { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }
-    .detail-heading h2 { margin:0; font-size:1.2rem; }
+    .detail-heading h2 { margin:0; font-size:1.35rem; }
     .detail-heading p, .detail-empty { margin:4px 0 0; color:var(--secondary-text-color); }
-    .detail-close { appearance:none; border:0; width:32px; height:32px; border-radius:50%; color:var(--primary-text-color); background:color-mix(in srgb, var(--primary-text-color) 8%, transparent); font:1.5rem/1 sans-serif; cursor:pointer; }
-    .detail-entities { display:grid; gap:4px; max-height:50vh; overflow:auto; }
-    .detail-entity { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; padding:10px; border:0; border-radius:9px; color:var(--primary-text-color); background:transparent; text-align:left; font:inherit; cursor:pointer; }
-    .detail-entity:hover { background:color-mix(in srgb, var(--area-glance-accent) 9%, transparent); }
+    .detail-close { appearance:none; border:0; width:32px; height:32px; border-radius:50%; color:var(--primary-text-color); background:color-mix(in srgb, var(--primary-text-color) 8%, transparent); font:1.5rem/1 sans-serif; cursor:pointer; outline:none; }
+    .detail-close:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }
+    .detail-entities { display:grid; gap:4px; max-height:50vh; overflow:auto; overflow-x:hidden; }
+    .detail-entity { display:flex; align-items:center; gap:6px; border-radius:9px; }
+    .detail-entity-main { display:flex; flex:1; min-width:0; align-items:center; justify-content:space-between; gap:12px; padding:10px; border:0; border-radius:9px; color:var(--primary-text-color); background:transparent; text-align:left; font:inherit; cursor:pointer; }
+    .detail-entity-main > span:first-child { min-width:0; }
+    .detail-entity:hover, .detail-entity:focus-within { background:color-mix(in srgb, var(--area-glance-accent) 9%, transparent); }
     .detail-entity strong, .detail-entity small { display:block; }
-    .detail-entity small { margin-top:2px; color:var(--secondary-text-color); font-size:.75rem; }
+    .detail-entity small { margin-top:2px; color:var(--secondary-text-color); font-size:.75rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .detail-state { color:var(--secondary-text-color); white-space:nowrap; font-size:.86rem; }
+    .detail-control { box-sizing:border-box; display:flex; align-items:center; width:52px; height:30px; padding:3px; border:0; border-radius:999px; color:var(--secondary-text-color); background:color-mix(in srgb, var(--primary-text-color) 16%, transparent); cursor:pointer; transition:background .18s ease; }
+    .detail-control.active { justify-content:flex-end; background:var(--state-light-active-color, var(--warning-color, #ff9800)); }
+    .detail-toggle-thumb { display:block; width:24px; height:24px; border-radius:50%; background:var(--card-background-color); box-shadow:0 1px 3px rgb(0 0 0 / 18%); transition:transform .18s ease; }
+    .detail-control:disabled { opacity:.55; cursor:wait; }
+    .light-control-panel { padding:28px; }
+    .light-control-panel .detail-heading { margin-bottom:20px; }
+    .light-control-panel .detail-heading h2 { font-size:clamp(1.7rem, 7vw, 2.4rem); letter-spacing:-.035em; }
+    .light-control-panel .detail-heading p { font-size:1.05rem; }
+    .light-control-panel .detail-close { width:42px; height:42px; font-size:2rem; }
+    .detail-count { display:inline-flex; align-items:center; gap:9px; padding:8px 13px; margin:0 0 18px; border-radius:999px; color:var(--primary-text-color); background:color-mix(in srgb, var(--primary-text-color) 7%, transparent); font-size:.95rem; font-weight:600; }
+    .detail-count-dot { width:11px; height:11px; border-radius:50%; background:var(--state-light-active-color, var(--warning-color, #ff9800)); }
+    .detail-all-lights { display:flex; align-items:center; gap:14px; padding:15px 18px; margin-bottom:18px; border:1px solid color-mix(in srgb, var(--primary-text-color) 10%, transparent); border-radius:16px; background:color-mix(in srgb, var(--primary-text-color) 3%, transparent); }
+    .detail-icon-badge { display:grid; flex:none; place-items:center; width:50px; height:50px; border-radius:50%; color:var(--secondary-text-color); background:color-mix(in srgb, var(--primary-text-color) 6%, transparent); }
+    .detail-icon-badge.active { color:var(--state-light-active-color, var(--warning-color, #ff9800)); }
+    .detail-icon-badge ha-icon { width:27px; height:27px; margin:0; color:currentColor; }
+    .detail-all-copy { min-width:0; flex:1; }
+    .detail-all-copy strong, .detail-all-copy small { display:block; }
+    .detail-all-copy strong { font-size:1.05rem; }
+    .detail-all-copy small { margin-top:3px; color:var(--secondary-text-color); }
+    .light-control-panel .detail-entities { gap:0; max-height:47vh; border:1px solid color-mix(in srgb, var(--primary-text-color) 11%, transparent); border-radius:16px; background:color-mix(in srgb, var(--primary-text-color) 1.5%, transparent); }
+    .light-control-panel .detail-entity { gap:14px; min-height:76px; padding:12px 18px; border-radius:0; }
+    .light-control-panel .detail-entity + .detail-entity { border-top:1px solid color-mix(in srgb, var(--primary-text-color) 10%, transparent); }
+    .light-control-panel .detail-entity-main { padding:0; border-radius:7px; }
+    .light-control-panel .detail-entity:hover, .light-control-panel .detail-entity:focus-within { background:color-mix(in srgb, var(--area-glance-accent) 6%, transparent); }
+    .light-control-panel .detail-entity strong { font-size:1.02rem; }
+    .light-control-panel .detail-entity small { font-size:.9rem; }
+    .light-control-panel .detail-control { width:56px; height:32px; }
+    .light-control-panel .detail-toggle-thumb { width:26px; height:26px; }
+    @media (max-width: 500px) { .detail-sheet { width:calc(100vw - 20px); max-height:84vh; border-radius:20px; } .light-control-panel { padding:22px 18px; } .light-control-panel .detail-entity { padding:11px 13px; gap:11px; } .light-control-panel .detail-icon-badge { width:44px; height:44px; } .light-control-panel .detail-icon-badge ha-icon { width:24px; height:24px; } }
     @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:clamp(88px, 25%, 108px) minmax(0, 1fr); padding:7px 8px; } .title { font-size:min(calc(var(--area-glance-title-size, 1.8rem) * var(--area-glance-title-scale, 1)), 1.48rem); } .status { font-size:calc(var(--area-glance-status-size, .85rem) * var(--area-glance-status-scale, 1)); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .label { margin-top:1px; } }
   `;
 }
