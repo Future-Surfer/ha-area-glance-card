@@ -19,7 +19,7 @@ The card is not intended to become a generic dashboard layout engine, a templati
 
 ## Current baseline
 
-- Area-led suggestions for room, media, energy, battery, and whole-home cards.
+- Area-led suggestions for room, media, battery, and whole-home cards, plus a system-wide Energy profile that reads the explicit live sources configured in Home Assistant's Energy Dashboard.
 - Compact, stacked, and metrics-only layouts with theme-aware appearance controls.
 - Automatic temperature, humidity, lights, live power, CO₂, PM2.5, VOC, AQI, motion, presence, doors, windows, and leak summaries.
 - Strict measurement matching for automatic numeric area insights, with a narrow legacy fallback for classless CO₂ sensors.

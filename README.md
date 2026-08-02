@@ -30,7 +30,7 @@ type: module
 
 For areas, automatic suggestions include temperature, humidity, lights, live power, CO₂, PM2.5, VOC, AQI, motion, presence, doors, windows, blinds, locks, leaks, and Attention (unavailable entities or updates). Matching favours Home Assistant domains, device classes, and units—not loose entity-name matching.
 
-You can also start with **Whole home**, **Energy**, **Home battery**, or **Security**. Security is deliberately conservative: it reports the monitored alarm, doors, windows, and locks without claiming coverage the card cannot verify.
+You can also start with **Whole home**, **Energy**, **Home battery**, or **Security**. With no area selected, **Energy** reads the live grid, solar, battery flow, and battery charge sources configured in Home Assistant's Energy Dashboard—never guessed from entity names. If Energy Dashboard is not configured, replace those slots with your own entity insights. Security is deliberately conservative: it reports the monitored alarm, doors, windows, and locks without claiming coverage the card cannot verify.
 
 Dedicated entity-led insights are available for:
 

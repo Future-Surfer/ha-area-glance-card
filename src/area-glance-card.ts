@@ -7,6 +7,12 @@ import type { ActionConfig, AreaGlanceConfig, AreaSignal, EntityState, HassLike,
 const UNAVAILABLE = new Set(["unknown", "unavailable", "none", ""]);
 const DEFAULT_METRICS = [presetMetric("temperature"), presetMetric("lights"), presetMetric("power"), presetMetric("device")];
 const DEFAULT_SECURITY_METRICS = [presetMetric("alarm"), presetMetric("doors"), presetMetric("windows"), presetMetric("locks")];
+const DEFAULT_ENERGY_METRICS: MetricConfig[] = [
+  { ...presetMetric("power"), energy_source: "grid", label: "Grid", icon: "mdi:transmission-tower" },
+  { ...presetMetric("power"), energy_source: "solar", label: "Solar", icon: "mdi:solar-power-variant" },
+  { ...presetMetric("battery"), energy_source: "battery_soc", label: "Battery" },
+  { ...presetMetric("power"), energy_source: "battery_power", label: "Battery flow", icon: "mdi:battery-charging-medium" },
+];
 const AREA_SIGNAL_PRESETS = new Set<MetricPreset>(["motion", "presence", "doors", "windows", "blinds", "locks", "leaks"]);
 const AREA_MEASUREMENT_PRESETS = new Set<MetricPreset>(["temperature", "humidity", "power", "co2", "pm25", "voc", "aqi"]);
 const AUTOMATIC_METRIC_PRESETS: MetricPreset[] = ["temperature", "humidity", "lights", "power", "co2", "pm25", "voc", "aqi", "motion", "presence", "doors", "windows", "blinds", "locks", "attention", "leaks"];
@@ -286,6 +292,17 @@ interface DisplayValueParts {
   unit?: string;
 }
 
+interface EnergySourcePreference {
+  type?: string;
+  stat_rate?: string;
+  stat_soc?: string;
+  power_config?: { stat_rate_from?: string; stat_rate_to?: string };
+}
+
+interface EnergyPreferences {
+  energy_sources?: EnergySourcePreference[];
+}
+
 /** Keep measurement units visually secondary without changing the actual value or its accessible label. */
 const splitDisplayUnit = (value: string): DisplayValueParts => {
   const match = value.match(/^(.+?)([µμ]g\/m(?:³|3)|mg\/m(?:³|3)|ppm|ppb|kW|MW|GW|TW|W|°C|°F|°|%|lx|hPa|kPa|km\/h|m\/s)$/);
@@ -326,6 +343,9 @@ export class AreaGlanceCard extends LitElement {
   public hass?: HassLike;
   private _config?: AreaGlanceConfig;
   private _detail?: DetailSheet;
+  private _energyPreferences?: EnergyPreferences;
+  private _energyPreferencesHass?: HassLike;
+  private _energyPreferencesRequest?: Promise<void>;
   private _clockTimer?: number;
   private _metricGesture?: { pointerId: number; metric: MetricConfig; display: MetricDisplay; startX: number; startY: number; held: boolean; timer?: number };
   private _pendingMetricTap?: { metric: MetricConfig; display: MetricDisplay; timer: number };
@@ -351,8 +371,10 @@ export class AreaGlanceCard extends LitElement {
       ...config,
       metrics: config.metrics?.length
         ? config.metrics
-        : config.profile === "security" ? DEFAULT_SECURITY_METRICS : DEFAULT_METRICS,
+        : config.profile === "security" ? DEFAULT_SECURITY_METRICS
+          : config.profile === "energy" ? DEFAULT_ENERGY_METRICS : DEFAULT_METRICS,
     };
+    this._loadEnergyPreferences();
   }
 
   private _heightOption() { return HEIGHT_OPTIONS[this._config?.height ?? "slim"]; }
@@ -397,7 +419,55 @@ export class AreaGlanceCard extends LitElement {
   }
 
   protected willUpdate(changed: PropertyValues<this>) {
-    if (changed.has("hass")) this.requestUpdate();
+    if (changed.has("hass")) {
+      this._loadEnergyPreferences();
+      this.requestUpdate();
+    }
+  }
+
+  private _loadEnergyPreferences() {
+    if (this._config?.profile !== "energy" || !this.hass?.callWS || this._energyPreferencesHass === this.hass || this._energyPreferencesRequest) return;
+    const hass = this.hass;
+    const callWS = hass.callWS!;
+    this._energyPreferencesHass = hass;
+    this._energyPreferencesRequest = callWS<EnergyPreferences>({ type: "energy/get_prefs" })
+      .then((preferences) => {
+        if (this.hass === hass) this._energyPreferences = preferences;
+      })
+      .catch(() => {
+        if (this.hass === hass) this._energyPreferences = undefined;
+      })
+      .finally(() => {
+        this._energyPreferencesRequest = undefined;
+        this.requestUpdate();
+      });
+  }
+
+  private _energySource(type: EnergySourcePreference["type"]): EnergySourcePreference | undefined {
+    return this._energyPreferences?.energy_sources?.find((source) => source.type === type);
+  }
+
+  private _energyMetric(metric: MetricConfig): MetricDisplay | undefined {
+    const source = metric.energy_source;
+    if (!source) return undefined;
+    const grid = this._energySource("grid");
+    const solar = this._energySource("solar");
+    const battery = this._energySource("battery");
+    if (source === "grid") {
+      const importEntity = grid?.power_config?.stat_rate_from ?? grid?.stat_rate;
+      const exportEntity = grid?.power_config?.stat_rate_to;
+      const importValue = asNumber(this.hass?.states[importEntity ?? ""]?.state ?? "");
+      const exportValue = asNumber(this.hass?.states[exportEntity ?? ""]?.state ?? "");
+      const exporting = exportValue !== undefined && Math.abs(exportValue) > Math.abs(importValue ?? 0);
+      const entity = exporting ? exportEntity : importEntity;
+      if (!entity) return undefined;
+      return this._metric({ ...metric, energy_source: undefined, entity, source: "entity", label: metric.label_mode === "custom" ? metric.label : exporting ? "Export" : "Import", icon: metric.icon ?? (exporting ? "mdi:transmission-tower-export" : "mdi:transmission-tower-import") });
+    }
+    const entity = source === "solar" ? solar?.stat_rate
+      : source === "battery_soc" ? battery?.stat_soc
+        : battery?.stat_rate;
+    if (!entity) return undefined;
+    return this._metric({ ...metric, energy_source: undefined, entity, source: "entity" });
   }
 
   private _areaName(area?: string): string | undefined {
@@ -670,6 +740,7 @@ export class AreaGlanceCard extends LitElement {
 
   private _metric(metric: MetricConfig): MetricDisplay | undefined {
     if (metric.hidden) return undefined;
+    if (metric.energy_source) return this._energyMetric(metric);
     const preset = metric.preset ?? "custom";
     const defaults = PRESETS[preset];
     if (preset === "clock") return this._clockMetric(metric, metric.label ?? defaults.label, metric.icon ?? defaults.icon);
@@ -1126,11 +1197,18 @@ export class AreaGlanceCard extends LitElement {
     if (typeof configured === "string" && configured.startsWith("mdi:")) return configured;
     const [domain] = entityId.split(".");
     const deviceClass = String(state?.attributes.device_class ?? "");
+    const identity = `${entityId} ${state?.attributes.friendly_name ?? ""}`.toLowerCase();
     const isActive = state?.state === "on" || state?.state === "open" || state?.state === "unlocked";
     if (domain === "light") return this._lightDetailIcon(entityId);
     if (domain === "binary_sensor") {
-      if (deviceClass === "door" || deviceClass === "garage_door") return isActive ? "mdi:door-open" : "mdi:door-closed";
-      if (deviceClass === "window") return isActive ? "mdi:window-open" : "mdi:window-closed";
+      // A number of integrations expose contact sensors as the broad
+      // `opening` class. Use the entity's friendly identity only to separate
+      // that ambiguous class into the familiar door/window visuals; explicit
+      // Home Assistant device classes always take precedence.
+      const openingDoor = deviceClass === "opening" && /(door|garage|gate)/.test(identity);
+      const openingWindow = deviceClass === "opening" && /window/.test(identity);
+      if (deviceClass === "door" || deviceClass === "garage_door" || openingDoor) return isActive ? "mdi:door-open" : "mdi:door-closed";
+      if (deviceClass === "window" || openingWindow) return isActive ? "mdi:window-open" : "mdi:window-closed";
       if (deviceClass === "motion") return "mdi:motion-sensor";
       if (["occupancy", "presence"].includes(deviceClass)) return "mdi:account-check";
       if (["moisture", "problem"].includes(deviceClass)) return isActive ? "mdi:water-alert" : "mdi:water-check";
@@ -1151,6 +1229,9 @@ export class AreaGlanceCard extends LitElement {
     const state = this.hass?.states[entityId];
     const [domain] = entityId.split(".");
     const deviceClass = String(state?.attributes.device_class ?? "");
+    const identity = `${entityId} ${state?.attributes.friendly_name ?? ""}`.toLowerCase();
+    if (deviceClass === "opening" && /(door|garage|gate)/.test(identity)) return "Door sensor";
+    if (deviceClass === "opening" && /window/.test(identity)) return "Window sensor";
     const labels: Record<string, string> = { temperature: "Temperature sensor", humidity: "Humidity sensor", power: "Power sensor", energy: "Energy sensor", battery: "Battery", carbon_dioxide: "CO₂ sensor", pm25: "PM2.5 sensor", volatile_organic_compounds: "VOC sensor", aqi: "Air quality sensor", door: "Door sensor", garage_door: "Garage door", window: "Window sensor", motion: "Motion sensor", occupancy: "Occupancy sensor", presence: "Presence sensor", moisture: "Leak sensor", problem: "Problem sensor" };
     if (labels[deviceClass]) return labels[deviceClass];
     const domains: Record<string, string> = { lock: "Lock", cover: "Blind or cover", fan: "Fan", switch: "Switch", input_boolean: "Toggle", sensor: "Sensor", binary_sensor: "Binary sensor" };
@@ -1240,7 +1321,7 @@ export class AreaGlanceCard extends LitElement {
     const status = this._status();
     const metrics = (this._config.metrics ?? []).map((metric) => ({ metric, display: this._metric(metric) })).filter((entry): entry is { metric: MetricConfig; display: MetricDisplay } => Boolean(entry.display));
     const title = this._config.title
-      ?? (this._config.profile === "house" ? "House" : this._config.profile === "security" ? "Security" : this._areaName(this._config.area))
+      ?? (this._config.profile === "house" ? "House" : this._config.profile === "security" ? "Security" : this._config.profile === "energy" ? "Energy" : this._areaName(this._config.area))
       ?? "Area";
     const showHeader = this._config.layout !== "metrics-only";
     const headerAlignment = this._config.layout === "stacked" || this._config.layout === "tower" ? this._config.header_alignment ?? "left" : "left";
@@ -1281,9 +1362,10 @@ export class AreaGlanceCard extends LitElement {
           const lightEntities = this._detail.lightControlPanel ? this._lightEntityIds(this._detail) : [];
           const lightsOn = lightEntities.filter((entityId) => this.hass?.states[entityId]?.state === "on").length;
           const allLightsActive = lightsOn > 0;
+          const showAllLightsControl = lightEntities.length > 1;
           return html`<div class="detail-content ${this._detail.aggregatePanel ? "aggregate-panel" : ""}${this._detail.lightControlPanel ? " light-control-panel" : ""}">
           <div class="detail-heading"><div><h2>${this._detail.title}</h2><p>${this._detail.subtitle}</p></div><button class="detail-close" aria-label="Close" @click=${this._closeDetail}>×</button></div>
-          ${this._detail.lightControlPanel && lightEntities.length ? html`<div class="detail-count"><span class="detail-count-dot"></span>${lightsOn} of ${lightEntities.length} on</div><div class="detail-all-lights"><span class="detail-icon-badge active"><ha-icon icon="mdi:lightbulb-group-outline"></ha-icon></span><span class="detail-all-copy"><strong>All lights</strong><small>Turn all on or off</small></span><button class="detail-control ${allLightsActive ? "active" : ""}" role="switch" aria-checked=${String(allLightsActive)} aria-label=${allLightsActive ? "Some lights are on. Turn all lights off" : "All lights are off. Turn all lights on"} @click=${this._runAllLightsControl}><span class="detail-toggle-thumb"></span></button></div>` : this._detail.aggregatePanel && this._detail.summary ? html`<div class="detail-count generic">${this._detail.summary}</div>` : nothing}
+          ${this._detail.lightControlPanel && lightEntities.length ? html`<div class="detail-count"><span class="detail-count-dot"></span>${lightsOn} of ${lightEntities.length} on</div>${showAllLightsControl ? html`<div class="detail-all-lights"><span class="detail-icon-badge active"><ha-icon icon="mdi:lightbulb-group-outline"></ha-icon></span><span class="detail-all-copy"><strong>All lights</strong><small>Turn all on or off</small></span><button class="detail-control ${allLightsActive ? "active" : ""}" role="switch" aria-checked=${String(allLightsActive)} aria-label=${allLightsActive ? "Some lights are on. Turn all lights off" : "All lights are off. Turn all lights on"} @click=${this._runAllLightsControl}><span class="detail-toggle-thumb"></span></button></div>` : nothing}` : this._detail.aggregatePanel && this._detail.summary ? html`<div class="detail-count generic">${this._detail.summary}</div>` : nothing}
           ${this._detail.statistics?.length ? html`<div class="detail-statistics" aria-label="Aggregate statistics">${this._detail.statistics.map((statistic) => html`<span><small>${statistic.label}</small><strong>${statistic.value}</strong></span>`)}</div>` : nothing}
           ${this._detail.entities.length ? html`<div class="detail-entities">${this._detail.entities.map((entityId) => {
             const control = this._detail?.quickControls ? this._quickControl(entityId) : undefined;
@@ -1453,10 +1535,13 @@ export class AreaGlanceCardEditor extends LitElement {
   private _draggedMetricHeight = 0;
   /** Original row centres captured before any preview transforms are applied. */
   private _dragMetricMidpoints: { index: number; midpoint: number }[] = [];
+  /** Native drag event ordering differs between browsers and embedded HA views. */
+  private _dragDropCommitted = false;
+  private _dragEndTimer?: number;
 
   static get properties() { return { hass: { attribute: false }, _config: { state: true }, _suggestionsNeedUpdate: { state: true } }; }
   public setConfig(config: AreaGlanceConfig) {
-    this._config = { ...config, metrics: config.metrics?.length ? config.metrics : DEFAULT_METRICS };
+    this._config = { ...config, metrics: config.metrics?.length ? config.metrics : config.profile === "energy" ? DEFAULT_ENERGY_METRICS : DEFAULT_METRICS };
   }
 
   private _change(change: Partial<AreaGlanceConfig>) {
@@ -1534,7 +1619,7 @@ export class AreaGlanceCardEditor extends LitElement {
     return "area";
   }
   private _purposeSelected(purpose: "area" | "house" | "energy" | "battery" | "security") {
-    if (purpose === "house" || purpose === "security") {
+    if (purpose === "house" || purpose === "security" || purpose === "energy") {
       this._populateAreaPreset("", purpose);
       return;
     }
@@ -1635,8 +1720,19 @@ export class AreaGlanceCardEditor extends LitElement {
     return "room";
   }
   private _populateAreaPreset(area: string, requestedProfile = this._config.profile ?? "auto") {
-    const entities = this._entitiesInArea(area);
     const profile = this._inferredProfile(area, requestedProfile);
+    if (profile === "energy" && !area) {
+      this._suggestionsNeedUpdate = false;
+      this._change({
+        area: undefined,
+        profile: "energy",
+        title: this._config.layout === "metrics-only" ? this._config.title : "Energy",
+        status: undefined,
+        metrics: DEFAULT_ENERGY_METRICS.map((metric) => ({ ...metric })),
+      });
+      return;
+    }
+    const entities = this._entitiesInArea(area);
     const state = (entityId: string) => this.hass?.states[entityId];
     const first = (predicate: (entityId: string) => boolean) => entities.find(predicate);
     const hasDeviceClass = (entityId: string, deviceClass: string) => isMeasurementSensor(entityId, state(entityId)) && state(entityId)?.attributes.device_class === deviceClass;
@@ -1711,7 +1807,7 @@ export class AreaGlanceCardEditor extends LitElement {
     this._change({
       area: area || undefined,
       profile: requestedProfile,
-      title: this._config.layout === "metrics-only" ? this._config.title : profile === "house" ? "House" : profile === "security" ? "Security" : this._areaName(area),
+      title: this._config.layout === "metrics-only" ? this._config.title : profile === "house" ? "House" : profile === "security" ? "Security" : profile === "energy" ? "Energy" : this._areaName(area),
       status: profile === "security" ? { source: "security", action: "status-details" } : presence && (profile === "room" || profile === "media") ? { source: "area_presence", ...(area ? { area } : {}) } : motion && (profile === "room" || profile === "media") ? { source: "area_motion", ...(area ? { area } : {}), active_text: "Motion", inactive_text: "No motion", show_last_changed: true, last_changed_text: "Last motion" } : door && profile === "house" ? { source: "area_doors", inactive_text: "All doors" } : this._config.status,
       metrics: metrics.length ? metrics : this._config.metrics,
     });
@@ -1841,6 +1937,9 @@ export class AreaGlanceCardEditor extends LitElement {
   }
   private _dragStart(index: number, event: DragEvent) {
     event.stopPropagation();
+    if (this._dragEndTimer !== undefined) window.clearTimeout(this._dragEndTimer);
+    this._dragEndTimer = undefined;
+    this._dragDropCommitted = false;
     this._draggedMetricIndex = index;
     this._dragOverMetricIndex = undefined;
     const source = (event.currentTarget as HTMLElement).closest<HTMLElement>(".insight-editor");
@@ -1875,25 +1974,51 @@ export class AreaGlanceCardEditor extends LitElement {
     this._dragOverMetricIndex = nextTarget;
     this.requestUpdate();
   }
-  private _dragEnd() {
+  private _resetDragState() {
     this._draggedMetricIndex = undefined;
     this._dragOverMetricIndex = undefined;
     this._draggedMetricHeight = 0;
     this._dragMetricMidpoints = [];
     this.requestUpdate();
   }
+
+  private _commitMetricMove(from: number, to: number) {
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from === to || from < 0 || to < 0) return;
+    const metrics = [...(this._config.metrics ?? [])];
+    const [moved] = metrics.splice(from, 1);
+    if (!moved) return;
+    metrics.splice(to, 0, moved);
+    this._change({ metrics });
+  }
+
+  private _dragEnd(event: DragEvent) {
+    const from = this._draggedMetricIndex;
+    const to = this._dragOverMetricIndex;
+    if (from === undefined) {
+      this._dragDropCommitted = false;
+      return;
+    }
+    // `drop` normally fires first. Some embedded/mobile WebViews dispatch
+    // `dragend` first, so defer a one-time fallback until the event cycle has
+    // completed. A cancelled/outside drop reports `none` and never reorders.
+    const canUseFallback = event.dataTransfer?.dropEffect === "move";
+    this._dragEndTimer = window.setTimeout(() => {
+      if (!this._dragDropCommitted && canUseFallback && to !== undefined) this._commitMetricMove(from, to);
+      this._resetDragState();
+      this._dragDropCommitted = false;
+      this._dragEndTimer = undefined;
+    }, 0);
+  }
+
   private _dropMetric(index: number, event: DragEvent) {
     event.preventDefault();
     const from = this._draggedMetricIndex ?? Number(event.dataTransfer?.getData("text/plain"));
-    this._draggedMetricIndex = undefined;
-    this._dragOverMetricIndex = undefined;
-    this._draggedMetricHeight = 0;
-    this._dragMetricMidpoints = [];
-    if (!Number.isInteger(from) || from === index || from < 0) return;
-    const metrics = [...(this._config.metrics ?? [])];
-    const [moved] = metrics.splice(from, 1);
-    metrics.splice(index, 0, moved);
-    this._change({ metrics });
+    // Prefer the live target calculated from row midpoints. It is resilient to
+    // the row shifting animation and avoids relying on a stale render closure.
+    const to = this._dragOverMetricIndex ?? index;
+    this._dragDropCommitted = true;
+    this._commitMetricMove(from, to);
+    this._resetDragState();
   }
   /** Shift surrounding rows into the source row's space without moving the
    * active draggable element in the DOM (which would cancel native dragging). */
@@ -1997,7 +2122,7 @@ export class AreaGlanceCardEditor extends LitElement {
         <div class="purpose-grid">
           ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"], ["security", "Security", "Home security"] ] as const).map(([value, title, description]) => html`<button class="purpose ${value === "security" ? "security" : ""} ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
         </div>
-        ${purpose === "house" || purpose === "security" ? html`<p class="applied">${purpose === "security" ? "Whole-home security suggestions are applied." : "Whole-home suggestions are applied."} You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._config.area ?? ""} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
+        ${purpose === "house" || purpose === "security" || purpose === "energy" ? html`<p class="applied">${purpose === "energy" ? "System-wide live insights come from the Energy Dashboard setup. If it is not configured, add your own entity insights below." : purpose === "security" ? "Whole-home security suggestions are applied." : "Whole-home suggestions are applied."} You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._config.area ?? ""} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
       </section>
       <section class="insights"><h3>Insights</h3><p class="hint">Keep up to five. They resize automatically to fit the card.</p>
       ${metrics.map((metric, index) => {
@@ -2012,7 +2137,7 @@ export class AreaGlanceCardEditor extends LitElement {
         const usesAggregate = usesArea || usesSelectedEntities;
         const selfContained = preset === "clock" || preset === "calendar";
         const requiresEntity = source === "entity" && !selfContained;
-        const sourceLabel = usesArea ? (wholeHomeAggregate ? "Whole home" : preset === "attention" ? "Area health" : preset === "lights" ? "Area count" : "Whole area") : usesSelectedEntities ? "Selected entities" : selfContained ? "Live date & time" : preset === "people_home" ? "Home zone" : "One entity";
+        const sourceLabel = metric.energy_source ? "Energy Dashboard" : usesArea ? (wholeHomeAggregate ? "Whole home" : preset === "attention" ? "Area health" : preset === "lights" ? "Area count" : "Whole area") : usesSelectedEntities ? "Selected entities" : selfContained ? "Live date & time" : preset === "people_home" ? "Home zone" : "One entity";
         const contributorHint = this._contributorHint(metric, preset, usesArea);
         const candidates = usesArea ? this._aggregateCandidates(metric, preset) : [];
         const selectedCandidates = usesSelectedEntities ? this._selectedEntityCandidates(preset) : [];
@@ -2027,7 +2152,7 @@ export class AreaGlanceCardEditor extends LitElement {
           : isTemperatureDisplay ? [["", "Home Assistant default"], ["°C", "Celsius (°C)"], ["°F", "Fahrenheit (°F)"]]
             : undefined;
         return html`<details class="insight-editor ${this._draggedMetricIndex === index ? "dragging" : ""} ${this._dragOverMetricIndex === index ? "drag-over" : ""}" style=${`--reorder-shift:${this._dragShift(index)}px`} @dragover=${(event: DragEvent) => this._dragOver(event)} @drop=${(event: DragEvent) => this._dropMetric(index, event)}>
-        <summary><span class="drag-handle" draggable="true" role="img" aria-label="Drag insight to reorder" title="Drag to reorder" @click=${(event: Event) => { event.preventDefault(); event.stopPropagation(); }} @dragstart=${(event: DragEvent) => this._dragStart(index, event)} @dragend=${this._dragEnd}>⠿</span><ha-icon .icon=${metric.icon ?? PRESETS[preset].icon}></ha-icon><span class="insight-name">${PRESETS[preset].label}</span><span class="source-pill">${sourceLabel}</span></summary>
+        <summary><span class="drag-handle" draggable="true" role="img" aria-label="Drag insight to reorder" title="Drag to reorder" @click=${(event: Event) => { event.preventDefault(); event.stopPropagation(); }} @dragstart=${(event: DragEvent) => this._dragStart(index, event)} @dragend=${(event: DragEvent) => this._dragEnd(event)}>⠿</span><ha-icon .icon=${metric.icon ?? PRESETS[preset].icon}></ha-icon><span class="insight-name">${PRESETS[preset].label}</span><span class="source-pill">${sourceLabel}</span></summary>
         <div class="insight-fields"><label>What should this show?
           <select .value=${metric.preset ?? "custom"} @change=${(e: Event) => this._updateMetric(index, { preset: (e.target as HTMLSelectElement).value as MetricPreset })}>
             <optgroup label="Automatic area insights">${AUTOMATIC_METRIC_PRESETS.map((option) => html`<option value=${option}>${PRESETS[option].label}</option>`)}</optgroup>
@@ -2036,7 +2161,7 @@ export class AreaGlanceCardEditor extends LitElement {
           </select>
         </label>
         <p class="slot-hint">${SLOT_HELPERS[preset]}</p>
-        ${canChooseSource ? html`<label>Use data from
+        ${metric.energy_source ? html`<p class="slot-hint">This live reading is linked to the matching source in your Energy Dashboard. Remove it or add another insight if you would prefer a manual entity.</p>` : canChooseSource ? html`<label>Use data from
           <select .value=${source} @change=${(e: Event) => this._metricSourceChanged(index, e)}>
             <option value="area">Whole area or home (recommended)</option>
             <option value="entities">Selected entities</option>

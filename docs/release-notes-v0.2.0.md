@@ -10,11 +10,12 @@
 - New layouts: title above insights, insights only, and a compact one-column Insight tower, alongside the original title-beside-insights band.
 - A much more capable visual editor with starter profiles, drag-to-reorder, duplicate, advanced aggregation, contributor membership, actions, display controls, and clearer entity/icon pickers.
 - More flexible presentation: height, header alignment and line behaviour, optional area icon, card-wide text scales, and bold/regular/light text weights.
+- The system-wide Energy profile now uses Home Assistant's configured Energy Dashboard sources for live grid flow, solar, battery flow, and battery charge, instead of entity-name inference.
 
 ## Improvements since v0.1.0
 
 - Automatic matching now prioritises Home Assistant domains, device classes, and measurement units rather than broad name matching.
-- Whole-home, Energy, Home battery, and Security profiles complement the standard area workflow.
+- Whole-home, Home battery, and Security profiles complement the standard area workflow; Energy is explicitly system-wide when no area is selected.
 - Header statuses and insights support Home Assistant tap, hold, and double-tap actions.
 - Numeric insights support aggregation selection, decimals, unit display/override, threshold colours, and inverted power direction.
 - Explicit entity insights can use friendly entity labels; Custom combination supports separate main, supporting, icon, and colour-source entities.

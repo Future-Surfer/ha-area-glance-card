@@ -45,6 +45,8 @@ export interface HassLike {
   formatEntityName?: (state: EntityState, name?: unknown, options?: { separator?: string }) => string;
   formatEntityState?: (state: EntityState) => string;
   callService?: (domain: string, service: string, data?: Record<string, unknown>) => Promise<unknown>;
+  /** Home Assistant WebSocket helper, used for read-only frontend preferences such as Energy Dashboard setup. */
+  callWS?: <T = unknown>(message: Record<string, unknown>) => Promise<T>;
 }
 
 export interface ActionConfig {
@@ -81,6 +83,12 @@ export interface MetricConfig extends ActionConfig {
   preset?: MetricPreset;
   /** Where this insight obtains its data. Existing cards without this field retain their current behaviour. */
   source?: "area" | "entity" | "entities";
+  /**
+   * Bind this metric to one of the live sources configured in Home Assistant's
+   * Energy Dashboard. It is intentionally separate from ordinary entity and
+   * area aggregation, so a system Energy card never guesses by entity name.
+   */
+  energy_source?: "grid" | "solar" | "battery_soc" | "battery_power";
   entity?: string;
   /** A deliberate group of entities, independent of Home Assistant area membership. */
   entities?: string[];
