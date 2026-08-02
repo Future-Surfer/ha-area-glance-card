@@ -1,32 +1,46 @@
 # Area Glance Card
 
-Area Glance turns the entities assigned to a Home Assistant area into a compact, dependable live summary.
+**Choose an area and get a compact, live summary of the things that matter there.**
 
 [![Open HACS repository on My Home Assistant](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Future-Surfer&repository=ha-area-glance-card&category=plugin)
 
 ![Choose an area, get useful insights](docs/screenshots/area-to-insights.png)
 
-## Start with an area
+## Get started
 
 1. Install with HACS using the button above.
-2. Add **Area Glance Card** and open its visual editor.
-3. Choose **An area** and select your room. Leave **Starter profile** on Auto.
+2. Add **Area Glance Card** to a dashboard and open its visual editor.
+3. Choose **An area**, select a room, and leave the starter profile on **Auto**.
 
-The card suggests useful, live insights using Home Assistant's area metadata. Swap, remove, reorder, or duplicate any insight afterwards.
+The card suggests compatible, live insights from Home Assistant's area metadata. Rearrange, remove, duplicate, or swap any insight afterwards.
 
 ```yaml
 type: custom:area-glance-card
 area: living_room
 ```
 
-Three useful starting points are just as small:
+If HACS has not added the dashboard resource, add it manually:
 
 ```yaml
-# Whole-home energy summary
-type: custom:area-glance-card
-profile: energy
+url: /hacsfiles/ha-area-glance-card/area-glance-card.js
+type: module
+```
 
-# One explicit entity, without automatic matching
+## What it can show
+
+For areas, automatic suggestions include temperature, humidity, lights, live power, CO₂, PM2.5, VOC, AQI, motion, presence, doors, windows, blinds, locks, leaks, and Attention (unavailable entities or updates). Matching favours Home Assistant domains, device classes, and units—not loose entity-name matching.
+
+You can also start with **Whole home**, **Energy**, **Home battery**, or **Security**. Security is deliberately conservative: it reports the monitored alarm, doors, windows, and locks without claiming coverage the card cannot verify.
+
+Dedicated entity-led insights are available for:
+
+- Weather with a live condition icon and a selected reading.
+- Robot vacuums with state, battery, or fan-speed display.
+- Digital or analogue clocks and a calendar-date tile.
+- A Custom combination: main value, optional supporting value, icon source, and state-based colours.
+
+```yaml
+# A deliberate group, independent of Home Assistant area membership
 type: custom:area-glance-card
 title: Air quality
 metrics:
@@ -35,55 +49,29 @@ metrics:
     label_mode: entity
 ```
 
-## What it can show
+## Trustworthy aggregates and useful detail
 
-Automatic area insights include temperature, humidity, lights on/total, summed power, CO₂, PM2.5, VOC, AQI, motion, room presence, doors, windows, blinds, locks, leaks, and Attention (unavailable entities or available updates). Area matching prefers Home Assistant domains, device classes, and units—not just names.
+Area aggregates include compatible new devices automatically. Use **Exclude entities from this area** to remove noise such as an always-on LED, while future compatible devices continue to be included. Use **Selected entities** when you want a deliberate cross-area group instead.
 
-Choose **Whole home**, **Energy**, **Home battery**, or **Security** instead of an area when that suits the card better. Security is deliberately conservative: it reports the alarm, monitored doors and windows, and locks without claiming unverified coverage.
+Tap an aggregate to inspect exactly which entities contribute. Light aggregates include individual and all-lights toggles; numeric temperature and power aggregates show useful summary statistics. The same aggregate membership controls are available for area-based header statuses.
 
-For an individual device, choose a specific entity. Dedicated options are available for:
+## Layout and appearance
 
-- Weather: live condition icon, temperature, feels-like temperature, humidity, or wind.
-- Robot vacuum: activity, battery level, or fan speed with state-aware icon colours.
-- Clock: digital or analogue.
-- Calendar date: a compact live date tile.
-- Custom combination: a main entity, optional supporting entity, optional icon source, and state-to-colour rules.
+Choose **Title beside insights** (the compact band), **Title above insights**, **Insight tower**, or **Insights only**. Stacked headers can align left, centre, or right. Cards resize their visible insights automatically.
 
-## Make an aggregate trustworthy
+Appearance controls cover height, theme-aware colour style, background, shadow, optional area icon, shared text weight (bold, regular, or light), and card-wide title, status, value, and label size adjustments.
 
-Area insights include compatible newly added devices automatically. Open **Exclude entities from this area** to remove noise such as always-on LEDs; the next compatible device will still be included by default. You can instead choose **Selected entities** for a deliberate cross-area group.
-
-Numeric groups support sum, average, median, highest, and lowest aggregation. Tap an aggregate to see its contributors. The same automatic-exclusion model is available for area-based header statuses, including the Security header.
-
-## Layout, interaction, and appearance
-
-Choose the format that fits the dashboard:
-
-- **Title beside insights** — the compact default band.
-- **Title above insights** — a wider stacked band with left, centre, or right header alignment.
-- **Insight tower** — compact vertical rows for one dashboard column.
-- **Insights only** — no header.
-
-Every insight can have tap, hold, and double-tap actions. Fine tuning also provides threshold colours, labels from the entity name or a custom label, decimal precision, unit controls, icon/label visibility, power-direction inversion, and card-wide text-size controls.
+Every header and insight supports Home Assistant tap, hold, and double-tap actions. Fine tuning includes aggregation choice, threshold colours, label source, decimal precision, unit display/override, icon and label visibility, and power-direction inversion.
 
 ![Living-area example](docs/screenshots/living.png)
 
 ![Energy example](docs/screenshots/energy.png)
 
-## Installation note
+## Troubleshooting
 
-HACS normally adds the dashboard resource. If it does not, add this resource manually:
+Assign devices or entities to an area in Home Assistant for room-level suggestions. Leave the area blank for a whole-home aggregate, then use **Exclude entities from this home** to remove an outlier.
 
-```yaml
-url: /hacsfiles/ha-area-glance-card/area-glance-card.js
-type: module
-```
-
-## Automatic matching and troubleshooting
-
-Automatic insights use Home Assistant domains, device classes, and measurement units before considering an entity name. Assign devices or entities to an area in Home Assistant for room-level summaries. Leave the area blank for a whole-home aggregate, then use **Exclude entities from this home** to remove a known outlier.
-
-If an expected entity is absent, first check that it is assigned to the intended area and exposes the expected device class/unit. Choose **A specific entity** or **Selected entities** when that device is intentionally exceptional. An aggregate’s contributor sheet shows exactly what is currently included.
+If an expected device is missing, check its area assignment and device class/unit first. Choose **A specific entity** or **Selected entities** when it is intentionally exceptional. The contributor sheet is the quickest way to see what an aggregate currently includes.
 
 ## Development
 

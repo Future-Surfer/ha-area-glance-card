@@ -315,6 +315,11 @@ interface DetailSheet {
   quickControls?: boolean;
   /** Lights get a deliberately richer control panel; other aggregates remain compact. */
   lightControlPanel?: boolean;
+  /** Shared grouped presentation for automatic/selected aggregates. */
+  aggregatePanel?: boolean;
+  summary?: string;
+  /** A compact, context-setting breakdown for measurement aggregates. */
+  statistics?: { label: string; value: string }[];
 }
 
 export class AreaGlanceCard extends LitElement {
@@ -398,6 +403,24 @@ export class AreaGlanceCard extends LitElement {
   private _areaName(area?: string): string | undefined {
     if (!area) return undefined;
     return this.hass?.areas?.[area]?.name ?? area.replaceAll("_", " ").replace(/\b\w/g, (l) => l.toUpperCase());
+  }
+
+  private _headerAreaIcon(title: string): string {
+    const configured = this._config?.appearance?.area_icon;
+    if (configured) return configured;
+    const profile = this._config?.profile;
+    if (profile === "house") return "mdi:home-outline";
+    if (profile === "energy" || profile === "battery") return "mdi:lightning-bolt-outline";
+    if (profile === "security") return "mdi:shield-home-outline";
+    const name = `${title} ${this._areaName(this._config?.area) ?? ""}`.toLowerCase();
+    if (/(living|lounge)/.test(name)) return "mdi:sofa-outline";
+    if (/(bed|sleep)/.test(name)) return "mdi:bed-outline";
+    if (/(kitchen|cook|dining)/.test(name)) return "mdi:stove";
+    if (/(office|study|desk)/.test(name)) return "mdi:desk";
+    if (/(bath|shower)/.test(name)) return "mdi:shower";
+    if (/(garage|workshop)/.test(name)) return "mdi:garage-variant";
+    if (/(garden|outside|outdoor|patio)/.test(name)) return "mdi:tree-outline";
+    return "mdi:map-marker-radius-outline";
   }
 
   private _areaEntities(area: string | undefined, domain?: string): string[] {
@@ -799,7 +822,7 @@ export class AreaGlanceCard extends LitElement {
     const tower = this._config?.layout === "tower";
     const textScale = this._config?.appearance?.text_scale;
     const percentage = (key: keyof NonNullable<NonNullable<AreaGlanceConfig["appearance"]>["text_scale"]>) =>
-      Math.max(0.8, Math.min(1.35, (textScale?.[key] ?? 100) / 100));
+      Math.max(0.75, Math.min(1.6, (textScale?.[key] ?? 100) / 100));
     const contentHeight = tower ? Math.round((38 + height.metricRowHeight * Math.max(metricCount, 1)) * scale) : stacked ? height.stackedContentHeight : height.contentHeight;
     return `${accent}--area-glance-content-height:${contentHeight}px;--area-glance-metrics-height:${height.metricRowHeight}px;--area-glance-pad-y:${Math.round(8 * scale)}px;--area-glance-pad-x:${Math.round(12 * scale)}px;--area-glance-title-size:${(1.85 * scale).toFixed(2)}rem;--area-glance-status-size:${(.95 * scale).toFixed(2)}rem;--area-glance-icon-size:${Math.round(25 * scale)}px;--area-glance-value-size:${(1.92 * scale).toFixed(2)}rem;--area-glance-label-size:${(.98 * scale).toFixed(2)}rem;--area-glance-title-scale:${percentage("title")};--area-glance-status-scale:${percentage("status")};--area-glance-value-scale:${percentage("value")};--area-glance-label-scale:${percentage("label")};--area-glance-metric-padding:${Math.max(1, Math.round(2 * scale))}px;`;
   }
@@ -865,11 +888,65 @@ export class AreaGlanceCard extends LitElement {
     this._detail = { title, subtitle: area ? "Entities in this area" : "Entities included in this view", entities: this._areaEntities(area), emptyMessage: "No entities are assigned to this area." };
   }
 
+  /**
+   * Detail-sheet statistics deliberately use the same contributor list as the
+   * rendered insight. That keeps manual selections and exclusions truthful.
+   */
+  private _aggregateStatistics(metric: MetricConfig, entityIds: string[]): { label: string; value: string }[] | undefined {
+    if (!this.hass || !["temperature", "power"].includes(metric.preset ?? "")) return undefined;
+    const samples = entityIds.map((entityId) => ({
+      value: asNumber(this.hass?.states[entityId]?.state ?? ""),
+      unit: String(this.hass?.states[entityId]?.attributes.unit_of_measurement ?? ""),
+    })).filter((sample): sample is { value: number; unit: string } => sample.value !== undefined);
+    if (!samples.length) return undefined;
+
+    // The compact insight can stay rounded; its detail breakdown should retain
+    // the useful precision that makes a median meaningful.
+    const decimals = metric.decimals ?? (metric.preset === "temperature" ? 1 : 0);
+    const format = (value: number, unit: string) => `${value.toLocaleString(undefined, {
+      useGrouping: false,
+      maximumFractionDigits: decimals,
+      minimumFractionDigits: decimals,
+    })}${metric.show_unit === false ? "" : unit}`;
+
+    if (metric.preset === "power") {
+      const watts = samples.map(({ value, unit }) => (metric.invert_value ? -1 : 1) * value * (POWER_UNIT_FACTORS[unit] ?? 1));
+      const totalWatts = watts.reduce((total, value) => total + value, 0);
+      const automaticUnit = Math.abs(totalWatts) >= 1_000_000 ? "MW" : Math.abs(totalWatts) >= 10_000 ? "kW" : "W";
+      const displayUnit = powerUnit(metric.unit) ?? automaticUnit;
+      const divisor = POWER_UNIT_FACTORS[displayUnit];
+      const powerDecimals = metric.decimals ?? (displayUnit === "W" ? 0 : 1);
+      const powerFormat = (value: number, extraPrecision = false) => `${value.toLocaleString(undefined, {
+        useGrouping: false,
+        maximumFractionDigits: metric.decimals ?? powerDecimals + (extraPrecision ? 1 : 0),
+        minimumFractionDigits: metric.decimals ?? powerDecimals + (extraPrecision ? 1 : 0),
+      })}${metric.show_unit === false ? "" : metric.unit ?? automaticUnit}`;
+      const peak = watts.reduce((largest, value) => Math.abs(value) > Math.abs(largest) ? value : largest, watts[0]);
+      return [
+        { label: "Total", value: powerFormat(totalWatts / divisor) },
+        { label: "Average", value: powerFormat(totalWatts / watts.length / divisor, true) },
+        { label: "Peak", value: powerFormat(peak / divisor) },
+      ];
+    }
+
+    const targetUnit = metric.unit ?? samples[0].unit;
+    const values = samples.map(({ value, unit }) => convertTemperature(value, unit, targetUnit));
+    const sorted = [...values].sort((left, right) => left - right);
+    const median = aggregateValues(values, "median");
+    const unit = metric.show_unit === false ? "" : metric.unit ?? "°";
+    return [
+      { label: "Min", value: format(sorted[0], unit) },
+      { label: "Median", value: format(median, unit) },
+      { label: "Max", value: format(sorted.at(-1)!, unit) },
+    ];
+  }
+
   private _openMetricDetails(metric: MetricConfig, display: MetricDisplay) {
     const area = metric.area ?? this._config?.area;
     const attention = metric.preset === "attention";
     const wholeHomeAttention = attention && metric.attention_scope === "home";
     const lightControlPanel = metric.preset === "lights" && display.aggregate === true;
+    const signalSummary = metric.preset && AREA_SIGNAL_PRESETS.has(metric.preset) ? display.value : undefined;
     this._detail = {
       title: display.label,
       subtitle: attention ? wholeHomeAttention ? "Checked across your home" : `Checked in ${this._areaName(area) ?? "this area"}` : lightControlPanel ? this._areaName(area) ?? "Your home" : area ? `Included from ${this._areaName(area) ?? "this area"}` : "Included entities",
@@ -877,6 +954,9 @@ export class AreaGlanceCard extends LitElement {
       emptyMessage: attention ? "No entities currently need attention for the selected checks." : "No compatible entities are currently contributing to this insight.",
       quickControls: display.aggregate === true,
       lightControlPanel,
+      aggregatePanel: display.aggregate === true,
+      summary: !lightControlPanel && display.aggregate ? signalSummary ?? `${display.entities?.length ?? 0} included` : undefined,
+      statistics: display.aggregate && !lightControlPanel ? this._aggregateStatistics(metric, display.entities ?? []) : undefined,
     };
   }
 
@@ -885,11 +965,14 @@ export class AreaGlanceCard extends LitElement {
     if (status?.source === "security") {
       const area = status.area ?? this._config?.area;
       const summary = this._securitySummary(area, status.membership);
+      const entities = [...summary.alarms, ...summary.doors.entities, ...summary.windows.entities, ...summary.locks.entities].map((entry) => entry.entityId);
       this._detail = {
         title: "Security",
         subtitle: area ? `Monitored in ${this._areaName(area) ?? "this area"}` : "Monitored security entities",
-        entities: [...summary.alarms, ...summary.doors.entities, ...summary.windows.entities, ...summary.locks.entities].map((entry) => entry.entityId),
+        entities,
         emptyMessage: "No alarm, door, window, or lock entities are currently being monitored.",
+        aggregatePanel: true,
+        summary: `${entities.length} monitored`,
       };
       return;
     }
@@ -897,11 +980,14 @@ export class AreaGlanceCard extends LitElement {
     if (!status || !signal) return;
     const area = status.area ?? this._config?.area;
     const labels: Record<AreaSignal, string> = { motion: "Motion", presence: "Presence", doors: "Doors", windows: "Windows", blinds: "Blinds", locks: "Locks", leaks: "Water leaks" };
+    const entities = this._areaSignalSummary(area, signal, { preset: signal, source: "area", membership: status.membership }).entities.map((entry) => entry.entityId);
     this._detail = {
       title: labels[signal],
       subtitle: area ? `Included from ${this._areaName(area) ?? "this area"}` : "Included entities",
-      entities: this._areaSignalSummary(area, signal, { preset: signal, source: "area", membership: status.membership }).entities.map((entry) => entry.entityId),
+      entities,
       emptyMessage: "No compatible entities are currently contributing to this status.",
+      aggregatePanel: true,
+      summary: `${entities.length} included`,
     };
   }
 
@@ -1034,6 +1120,71 @@ export class AreaGlanceCard extends LitElement {
     return "Light";
   }
 
+  private _detailEntityIcon(entityId: string): string {
+    const state = this.hass?.states[entityId];
+    const configured = state?.attributes.icon;
+    if (typeof configured === "string" && configured.startsWith("mdi:")) return configured;
+    const [domain] = entityId.split(".");
+    const deviceClass = String(state?.attributes.device_class ?? "");
+    const isActive = state?.state === "on" || state?.state === "open" || state?.state === "unlocked";
+    if (domain === "light") return this._lightDetailIcon(entityId);
+    if (domain === "binary_sensor") {
+      if (deviceClass === "door" || deviceClass === "garage_door") return isActive ? "mdi:door-open" : "mdi:door-closed";
+      if (deviceClass === "window") return isActive ? "mdi:window-open" : "mdi:window-closed";
+      if (deviceClass === "motion") return "mdi:motion-sensor";
+      if (["occupancy", "presence"].includes(deviceClass)) return "mdi:account-check";
+      if (["moisture", "problem"].includes(deviceClass)) return isActive ? "mdi:water-alert" : "mdi:water-check";
+      return isActive ? "mdi:checkbox-marked-circle" : "mdi:checkbox-blank-circle-outline";
+    }
+    if (domain === "lock") return state?.state === "locked" ? "mdi:lock" : "mdi:lock-open-variant";
+    if (domain === "cover") return ["open", "opening"].includes(state?.state ?? "") ? "mdi:blinds-open" : "mdi:blinds";
+    if (domain === "fan") return "mdi:fan";
+    if (domain === "switch" || domain === "input_boolean") return "mdi:toggle-switch-outline";
+    if (domain === "sensor") {
+      const icons: Record<string, string> = { temperature: "mdi:thermometer", humidity: "mdi:water-percent", power: "mdi:lightning-bolt", energy: "mdi:lightning-bolt", battery: "mdi:battery", carbon_dioxide: "mdi:molecule-co2", pm25: "mdi:air-filter", volatile_organic_compounds: "mdi:air-filter", aqi: "mdi:air-filter" };
+      return icons[deviceClass] ?? "mdi:chart-line";
+    }
+    return "mdi:information-outline";
+  }
+
+  private _detailEntityDescription(entityId: string): string {
+    const state = this.hass?.states[entityId];
+    const [domain] = entityId.split(".");
+    const deviceClass = String(state?.attributes.device_class ?? "");
+    const labels: Record<string, string> = { temperature: "Temperature sensor", humidity: "Humidity sensor", power: "Power sensor", energy: "Energy sensor", battery: "Battery", carbon_dioxide: "CO₂ sensor", pm25: "PM2.5 sensor", volatile_organic_compounds: "VOC sensor", aqi: "Air quality sensor", door: "Door sensor", garage_door: "Garage door", window: "Window sensor", motion: "Motion sensor", occupancy: "Occupancy sensor", presence: "Presence sensor", moisture: "Leak sensor", problem: "Problem sensor" };
+    if (labels[deviceClass]) return labels[deviceClass];
+    const domains: Record<string, string> = { lock: "Lock", cover: "Blind or cover", fan: "Fan", switch: "Switch", input_boolean: "Toggle", sensor: "Sensor", binary_sensor: "Binary sensor" };
+    return domains[domain] ?? entityId;
+  }
+
+  private _detailEntityState(entityId: string): string {
+    const state = this.hass?.states[entityId];
+    if (!state) return "Unavailable";
+    const [domain] = entityId.split(".");
+    const deviceClass = String(state.attributes.device_class ?? "");
+    if (domain === "binary_sensor") {
+      const labels: Record<string, [string, string]> = {
+        door: ["Closed", "Open"], garage_door: ["Closed", "Open"], window: ["Closed", "Open"],
+        motion: ["Clear", "Motion"], occupancy: ["Clear", "Occupied"], presence: ["Clear", "Occupied"],
+        moisture: ["Dry", "Wet"], problem: ["Clear", "Problem"],
+      };
+      const pair = labels[deviceClass];
+      if (pair) return state.state === "on" ? pair[1] : pair[0];
+    }
+    if (domain === "lock") return state.state === "locked" ? "Locked" : state.state === "unlocked" ? "Unlocked" : this._entityState(entityId);
+    if (domain === "cover") return friendlyState(state.state);
+    return this._entityState(entityId);
+  }
+
+  private _detailEntityTone(entityId: string): "active" | "attention" | "muted" | "normal" {
+    const state = this.hass?.states[entityId];
+    if (!state || UNAVAILABLE.has(state.state)) return "muted";
+    const deviceClass = String(state.attributes.device_class ?? "");
+    const active = state.state === "on" || state.state === "open" || state.state === "unlocked" || state.state === "triggered";
+    if (!active) return "normal";
+    return ["moisture", "problem"].includes(deviceClass) || state.state === "triggered" ? "attention" : "active";
+  }
+
   private _lightEntityIds(detail: DetailSheet): string[] {
     return detail.entities.filter((entityId) => entityId.startsWith("light.") && this.hass?.states[entityId]);
   }
@@ -1102,12 +1253,15 @@ export class AreaGlanceCard extends LitElement {
     const headerAction = this._config.header_action ?? this._config;
     const headerClickable = Boolean(headerAction.action && headerAction.action !== "none");
     const statusClickable = Boolean(this._config.status?.action && this._config.status.action !== "none");
+    const textWeight = appearance?.text_weight ?? (appearance?.style === "light" ? "light" : "bold");
+    const showAreaIcon = appearance?.show_area_icon === true;
     return html`
-      <ha-card class=${`${this._config.theme === "dark" ? "force-dark" : this._config.theme === "light" ? "force-light" : ""}${noShadow ? " no-shadow" : ""}${headerClickable ? " clickable" : ""}`} style=${`--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);${background ? `--area-glance-card-background:${background}` : ""}`} @click=${this._headerClicked}>
-        <section class=${showHeader ? `layout${this._config.layout === "stacked" ? " stacked" : ""}${this._config.layout === "tower" ? " tower" : ""}` : "layout metrics-only"} style=${this._layoutStyle(metrics.length)}>
-          ${showHeader ? html`<div class=${`summary align-${headerAlignment}`} style=${`--area-glance-title-fit:${titleFit}`}>
-              <div class=${`title ${titleLines}`}>${title}</div>
-              ${status.line ? html`<button class=${`status ${statusLines}${statusClickable ? " clickable" : ""}`} ?disabled=${!statusClickable} @click=${this._statusClicked}><span class="dot" style=${`background:${status.color}`}></span><span class="status-copy"><span class="status-line">${status.line}</span>${status.age ? html`<small class="status-age">${status.age}</small>` : nothing}</span></button>` : nothing}
+      <ha-card class=${`${this._config.theme === "dark" ? "force-dark" : this._config.theme === "light" ? "force-light" : ""}${textWeight !== "bold" ? ` ${textWeight}-weight` : ""}${noShadow ? " no-shadow" : ""}${headerClickable ? " clickable" : ""}`} style=${`--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);${background ? `--area-glance-card-background:${background}` : ""}`} @click=${this._headerClicked}>
+        <section class=${showHeader ? `layout${this._config.layout === "stacked" ? " stacked" : ""}${this._config.layout === "tower" ? " tower" : ""}${showAreaIcon ? " area-icon-layout" : ""}` : "layout metrics-only"} style=${this._layoutStyle(metrics.length)}>
+          ${showHeader ? html`<div class=${`summary align-${headerAlignment}${showAreaIcon ? " with-area-icon" : ""}`} style=${`--area-glance-title-fit:${titleFit}`}>
+              ${showAreaIcon ? html`<span class="area-icon" aria-hidden="true"><ha-icon icon=${this._headerAreaIcon(title)}></ha-icon></span>` : nothing}
+              <span class="summary-copy"><span class=${`title ${titleLines}`}>${title}</span>
+              ${status.line ? html`<button class=${`status ${statusLines}${statusClickable ? " clickable" : ""}`} ?disabled=${!statusClickable} @click=${this._statusClicked}><span class="dot" style=${`background:${status.color}`}></span><span class="status-copy"><span class="status-line">${status.line}</span>${status.age ? html`<small class="status-age">${status.age}</small>` : nothing}</span></button>` : nothing}</span>
             </div>` : nothing}
           <div class="metrics" style=${`--metric-count:${Math.max(metrics.length, 1)}`}>
             ${metrics.map(({ metric, display }) => {
@@ -1122,20 +1276,23 @@ export class AreaGlanceCard extends LitElement {
           </div>
         </section>
       </ha-card>
-      <dialog class="detail-sheet" @close=${this._closeDetail} @click=${(event: Event) => { if (event.target === event.currentTarget) this._closeDetail(); }}>
+      <dialog class="detail-sheet ${this._detail?.aggregatePanel ? "aggregate-sheet" : ""}${this._detail?.lightControlPanel ? " light-sheet" : ""}${(this._detail?.entities.length ?? 0) > 4 ? " scrollable-sheet" : ""}" @close=${this._closeDetail} @click=${(event: Event) => { if (event.target === event.currentTarget) this._closeDetail(); }}>
         ${this._detail ? (() => {
           const lightEntities = this._detail.lightControlPanel ? this._lightEntityIds(this._detail) : [];
           const lightsOn = lightEntities.filter((entityId) => this.hass?.states[entityId]?.state === "on").length;
           const allLightsActive = lightsOn > 0;
-          return html`<div class="detail-content ${this._detail.lightControlPanel ? "light-control-panel" : ""}">
+          return html`<div class="detail-content ${this._detail.aggregatePanel ? "aggregate-panel" : ""}${this._detail.lightControlPanel ? " light-control-panel" : ""}">
           <div class="detail-heading"><div><h2>${this._detail.title}</h2><p>${this._detail.subtitle}</p></div><button class="detail-close" aria-label="Close" @click=${this._closeDetail}>×</button></div>
-          ${this._detail.lightControlPanel && lightEntities.length ? html`<div class="detail-count"><span class="detail-count-dot"></span>${lightsOn} of ${lightEntities.length} on</div><div class="detail-all-lights"><span class="detail-icon-badge active"><ha-icon icon="mdi:lightbulb-group-outline"></ha-icon></span><span class="detail-all-copy"><strong>All lights</strong><small>Turn all on or off</small></span><button class="detail-control ${allLightsActive ? "active" : ""}" role="switch" aria-checked=${String(allLightsActive)} aria-label=${allLightsActive ? "Some lights are on. Turn all lights off" : "All lights are off. Turn all lights on"} @click=${this._runAllLightsControl}><span class="detail-toggle-thumb"></span></button></div>` : nothing}
+          ${this._detail.lightControlPanel && lightEntities.length ? html`<div class="detail-count"><span class="detail-count-dot"></span>${lightsOn} of ${lightEntities.length} on</div><div class="detail-all-lights"><span class="detail-icon-badge active"><ha-icon icon="mdi:lightbulb-group-outline"></ha-icon></span><span class="detail-all-copy"><strong>All lights</strong><small>Turn all on or off</small></span><button class="detail-control ${allLightsActive ? "active" : ""}" role="switch" aria-checked=${String(allLightsActive)} aria-label=${allLightsActive ? "Some lights are on. Turn all lights off" : "All lights are off. Turn all lights on"} @click=${this._runAllLightsControl}><span class="detail-toggle-thumb"></span></button></div>` : this._detail.aggregatePanel && this._detail.summary ? html`<div class="detail-count generic">${this._detail.summary}</div>` : nothing}
+          ${this._detail.statistics?.length ? html`<div class="detail-statistics" aria-label="Aggregate statistics">${this._detail.statistics.map((statistic) => html`<span><small>${statistic.label}</small><strong>${statistic.value}</strong></span>`)}</div>` : nothing}
           ${this._detail.entities.length ? html`<div class="detail-entities">${this._detail.entities.map((entityId) => {
             const control = this._detail?.quickControls ? this._quickControl(entityId) : undefined;
             const name = this._entityName(entityId);
-            const state = this._entityState(entityId);
+            const state = this._detailEntityState(entityId);
             const lightRow = this._detail?.lightControlPanel === true && entityId.startsWith("light.");
-            return html`<div class="detail-entity ${lightRow ? "detail-light-entity" : ""}">${lightRow ? html`<span class="detail-icon-badge ${control?.isOn ? "active" : ""}"><ha-icon icon=${this._lightDetailIcon(entityId)}></ha-icon></span>` : nothing}<button class="detail-entity-main" aria-label=${`${name}: ${state}. Show details`} @click=${() => this._openEntityDetails(entityId)}><span><strong>${name}</strong><small>${lightRow ? this._lightDetailDescription(entityId) : entityId}</small></span>${control ? nothing : html`<span class="detail-state">${state}</span>`}</button>${control ? html`<button class="detail-control ${control.isOn ? "active" : ""}" role="switch" aria-checked=${String(control.isOn)} aria-label=${`${name} is ${control.isOn ? "on" : "off"}. Toggle`} @click=${(event: Event) => this._runQuickControl(event, entityId)}><span class="detail-toggle-thumb"></span></button>` : nothing}</div>`;
+            const aggregateRow = this._detail?.aggregatePanel === true;
+            const tone = this._detailEntityTone(entityId);
+            return html`<div class="detail-entity ${lightRow ? "detail-light-entity" : ""}${aggregateRow ? " detail-aggregate-entity" : ""}">${aggregateRow ? html`<span class="detail-icon-badge ${lightRow && control?.isOn ? "active" : ""} ${lightRow ? "" : tone}"><ha-icon icon=${lightRow ? this._lightDetailIcon(entityId) : this._detailEntityIcon(entityId)}></ha-icon></span>` : nothing}<button class="detail-entity-main" aria-label=${`${name}: ${state}. Show details`} @click=${() => this._openEntityDetails(entityId)}><span><strong>${name}</strong><small>${lightRow ? this._lightDetailDescription(entityId) : aggregateRow ? this._detailEntityDescription(entityId) : entityId}</small></span>${control ? nothing : html`<span class="detail-state">${state}</span>`}</button>${control ? html`<button class="detail-control ${control.isOn ? "active" : ""}" role="switch" aria-checked=${String(control.isOn)} aria-label=${`${name} is ${control.isOn ? "on" : "off"}. Toggle`} @click=${(event: Event) => this._runQuickControl(event, entityId)}><span class="detail-toggle-thumb"></span></button>` : nothing}</div>`;
           })}</div>` : html`<p class="detail-empty">${this._detail.emptyMessage}</p>`}
         </div>`;
         })() : nothing}
@@ -1148,6 +1305,7 @@ export class AreaGlanceCard extends LitElement {
     ha-card.clickable { cursor:pointer; }
     ha-card.no-shadow { box-shadow:none; }
     .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:clamp(108px, 23%, 152px) minmax(0, 1fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
+    .layout.area-icon-layout { grid-template-columns:clamp(150px, 26%, 208px) minmax(0, 1fr); padding-inline:max(14px, var(--area-glance-pad-x, 12px)); }
     .layout.metrics-only { grid-template-columns:minmax(0, 1fr); }
     .layout.stacked { grid-template-columns:minmax(0, 1fr); grid-template-rows:auto minmax(var(--area-glance-metrics-height, 62px), 1fr); gap:8px; }
     .layout.stacked .summary { padding:3px 4px 0; }
@@ -1165,9 +1323,14 @@ export class AreaGlanceCard extends LitElement {
     .layout.tower .summary.align-right .status { justify-content:flex-end; text-align:right; }
     .layout.tower .metrics { grid-template-columns:minmax(0, 1fr); grid-auto-rows:minmax(var(--area-glance-metrics-height, 62px), 1fr); min-height:0; }
     .summary { min-width:0; align-self:center; padding:3px 8px 3px 4px; }
-    .title { box-sizing:border-box; width:100%; max-width:100%; color:var(--primary-text-color); font-size:calc(var(--area-glance-title-size, 1.8rem) * var(--area-glance-title-scale, 1) * var(--area-glance-title-fit, 1)); font-weight:720; letter-spacing:-.03em; line-height:1.12; padding-block:.03em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .summary-copy { display:block; min-width:0; }
+    .summary-copy > .title { display:block; }
+    .summary.with-area-icon { display:grid; grid-template-columns:44px minmax(0, 1fr); align-items:center; gap:10px; padding-left:0; }
+    .area-icon { display:grid; place-items:center; width:44px; height:44px; border-radius:50%; color:var(--primary-text-color); background:color-mix(in srgb, var(--primary-text-color) 5%, transparent); }
+    .area-icon ha-icon { width:25px; height:25px; margin:0; color:var(--primary-text-color); }
+    .title { box-sizing:border-box; width:100%; max-width:100%; color:var(--primary-text-color); font-size:calc(var(--area-glance-title-size, 1.8rem) * var(--area-glance-title-scale, 1) * var(--area-glance-title-fit, 1)); font-weight:800; letter-spacing:-.03em; line-height:1.12; padding-block:.03em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .title.multi { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; white-space:normal; }
-    .status { appearance:none; width:100%; padding:0; border:0; color:var(--secondary-text-color); background:transparent; display:flex; gap:6px; align-items:flex-start; margin-top:5px; font:inherit; font-size:calc(var(--area-glance-status-size, .85rem) * var(--area-glance-status-scale, 1)); line-height:1.15; min-width:0; text-align:left; }
+    .status { appearance:none; width:100%; padding:0; border:0; color:var(--secondary-text-color); background:transparent; display:flex; gap:6px; align-items:flex-start; margin-top:5px; font:inherit; font-size:calc(var(--area-glance-status-size, .85rem) * var(--area-glance-status-scale, 1)); font-weight:550; line-height:1.15; min-width:0; text-align:left; }
     .status.clickable { cursor:pointer; border-radius:6px; }
     .status.clickable:hover { background:color-mix(in srgb, var(--area-glance-accent) 8%, transparent); }
     .status:disabled { opacity:1; }
@@ -1184,6 +1347,14 @@ export class AreaGlanceCard extends LitElement {
     .metrics { min-width:0; display:grid; grid-template-columns:repeat(var(--metric-count), minmax(0, 1fr)); }
     .metric { appearance:none; position:relative; container-type:inline-size; border:0; background:transparent; color:var(--primary-text-color); display:flex; flex-direction:column; align-items:center; justify-content:center; min-width:0; padding:var(--area-glance-metric-padding, 3px); font:inherit; cursor:pointer; touch-action:manipulation; }
     .metric::before { content:""; position:absolute; left:0; top:10%; height:80%; width:1px; background:color-mix(in srgb, var(--primary-text-color) 12%, transparent); }
+    .regular-weight .title { font-weight:650; letter-spacing:-.024em; }
+    .regular-weight .status { font-weight:430; }
+    .regular-weight .value { font-weight:650; letter-spacing:-.018em; }
+    .regular-weight .label { font-weight:430; }
+    .light-weight .title { font-weight:480; letter-spacing:-.016em; }
+    .light-weight .status { font-weight:350; }
+    .light-weight .value { font-weight:500; letter-spacing:-.012em; }
+    .light-weight .label { font-weight:350; }
     .layout.stacked .metric:first-child::before, .layout.metrics-only .metric:first-child::before { display:none; }
     .layout.tower .metric { display:grid; grid-template-columns:calc(var(--area-glance-icon-size, 24px) + 10px) minmax(0, 1fr); grid-template-rows:auto auto; column-gap:8px; justify-content:start; align-content:center; text-align:left; padding-inline:8px; }
     .layout.tower .metric::before { left:8px; top:0; width:calc(100% - 16px); height:1px; }
@@ -1200,20 +1371,20 @@ export class AreaGlanceCard extends LitElement {
     .calendar-date { width:calc(var(--area-glance-icon-size, 24px) + 13px); min-height:calc(var(--area-glance-icon-size, 24px) + 13px); margin-bottom:2px; border:1.5px solid currentColor; border-radius:4px; overflow:hidden; display:flex; flex-direction:column; align-items:center; justify-content:center; line-height:1; flex:none; }
     .calendar-date small { width:100%; padding:2px 0 1px; color:#fff; background:currentColor; font-size:.42em; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
     .calendar-date strong { padding:2px 0 3px; color:currentColor; font-size:.76em; letter-spacing:-.04em; }
-    .value { display:flex; align-items:baseline; justify-content:center; min-width:0; font-size:calc(var(--area-glance-value-size, 1.6rem) * var(--area-glance-value-fit, 1) * var(--area-glance-value-scale, 1)); font-size:min(calc(var(--area-glance-value-size, 1.6rem) * var(--area-glance-value-fit, 1) * var(--area-glance-value-scale, 1)), var(--area-glance-value-cap, 27cqi)); line-height:1.05; padding-block:.03em; font-weight:720; letter-spacing:-.02em; white-space:nowrap; overflow:hidden; max-width:100%; }
+    .value { display:flex; align-items:baseline; justify-content:center; min-width:0; font-size:calc(var(--area-glance-value-size, 1.6rem) * var(--area-glance-value-fit, 1) * var(--area-glance-value-scale, 1)); font-size:min(calc(var(--area-glance-value-size, 1.6rem) * var(--area-glance-value-fit, 1) * var(--area-glance-value-scale, 1)), calc(var(--area-glance-value-cap, 27cqi) * var(--area-glance-value-scale, 1))); line-height:1.05; padding-block:.03em; font-weight:800; letter-spacing:-.02em; white-space:nowrap; overflow:hidden; max-width:100%; }
     .value-primary { min-width:0; overflow:hidden; text-overflow:ellipsis; }
     .value-unit { flex:none; margin-left:.06em; font-size:calc(1em * var(--area-glance-unit-fit, 1)); font-weight:700; letter-spacing:-.045em; }
-    .label { color:var(--secondary-text-color); font-size:calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1) * var(--area-glance-label-scale, 1)); font-size:min(calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1) * var(--area-glance-label-scale, 1)), var(--area-glance-label-cap, 15cqi)); line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; margin-top:1px; }
+    .label { color:var(--secondary-text-color); font-size:calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1) * var(--area-glance-label-scale, 1)); font-size:min(calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1) * var(--area-glance-label-scale, 1)), calc(var(--area-glance-label-cap, 15cqi) * var(--area-glance-label-scale, 1))); font-weight:550; line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; margin-top:1px; }
     .force-dark { --area-glance-card-background:#353c45; --primary-text-color:#f5f7fb; --secondary-text-color:#c4ccd8; }
     .force-light { --area-glance-card-background:#fff; --primary-text-color:#18212e; --secondary-text-color:#5f6b7e; }
-    .detail-sheet { width:min(560px, calc(100vw - 32px)); max-height:min(78vh, 720px); padding:0; border:0; border-radius:22px; color:var(--primary-text-color); background:var(--ha-card-background, var(--card-background-color)); box-shadow:0 18px 50px rgb(0 0 0 / 28%); overflow:hidden; }
+    .detail-sheet { box-sizing:border-box; width:min(560px, calc(100vw - 32px)); max-height:min(78dvh, 720px); padding:0; border:0; border-radius:22px; color:var(--primary-text-color); background:var(--ha-card-background, var(--card-background-color)); box-shadow:0 18px 50px rgb(0 0 0 / 28%); overflow:hidden; }
+    .detail-sheet.aggregate-sheet.scrollable-sheet { height:min(78dvh, 720px); }
     .detail-sheet::backdrop { background:rgb(0 0 0 / 30%); backdrop-filter:blur(8px); }
     .detail-content { padding:20px; overflow:hidden; }
     .detail-heading { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }
     .detail-heading h2 { margin:0; font-size:1.35rem; }
     .detail-heading p, .detail-empty { margin:4px 0 0; color:var(--secondary-text-color); }
     .detail-close { appearance:none; border:0; width:32px; height:32px; border-radius:50%; color:var(--primary-text-color); background:color-mix(in srgb, var(--primary-text-color) 8%, transparent); font:1.5rem/1 sans-serif; cursor:pointer; outline:none; }
-    .detail-close:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }
     .detail-entities { display:grid; gap:4px; max-height:50vh; overflow:auto; overflow-x:hidden; }
     .detail-entity { display:flex; align-items:center; gap:6px; border-radius:9px; }
     .detail-entity-main { display:flex; flex:1; min-width:0; align-items:center; justify-content:space-between; gap:12px; padding:10px; border:0; border-radius:9px; color:var(--primary-text-color); background:transparent; text-align:left; font:inherit; cursor:pointer; }
@@ -1226,13 +1397,31 @@ export class AreaGlanceCard extends LitElement {
     .detail-control.active { justify-content:flex-end; background:var(--state-light-active-color, var(--warning-color, #ff9800)); }
     .detail-toggle-thumb { display:block; width:24px; height:24px; border-radius:50%; background:var(--card-background-color); box-shadow:0 1px 3px rgb(0 0 0 / 18%); transition:transform .18s ease; }
     .detail-control:disabled { opacity:.55; cursor:wait; }
+    .aggregate-panel { box-sizing:border-box; min-height:0; padding:24px; }
+    .aggregate-sheet.scrollable-sheet .aggregate-panel { height:100%; display:flex; flex-direction:column; }
+    .aggregate-panel .detail-heading { margin-bottom:18px; }
+    .aggregate-panel .detail-heading h2 { font-size:1.7rem; letter-spacing:-.028em; }
+    .aggregate-panel .detail-heading p { font-size:1rem; }
+    .aggregate-panel .detail-entities { gap:0; border:1px solid color-mix(in srgb, var(--primary-text-color) 11%, transparent); border-radius:16px; background:color-mix(in srgb, var(--primary-text-color) 1.5%, transparent); }
+    .aggregate-sheet.scrollable-sheet .aggregate-panel .detail-entities { flex:1 1 auto; min-height:0; max-height:none; overscroll-behavior:contain; touch-action:pan-y; }
+    .detail-aggregate-entity { gap:13px; min-height:66px; padding:10px 14px; border-radius:0; }
+    .detail-aggregate-entity + .detail-aggregate-entity { border-top:1px solid color-mix(in srgb, var(--primary-text-color) 10%, transparent); }
+    .detail-aggregate-entity .detail-entity-main { padding:0; border-radius:7px; }
+    .detail-aggregate-entity:hover, .detail-aggregate-entity:focus-within { background:color-mix(in srgb, var(--area-glance-accent) 6%, transparent); }
+    .detail-icon-badge.attention { color:var(--error-color, #db4437); }
+    .detail-icon-badge.muted { color:var(--disabled-text-color); }
     .light-control-panel { padding:28px; }
     .light-control-panel .detail-heading { margin-bottom:20px; }
     .light-control-panel .detail-heading h2 { font-size:clamp(1.7rem, 7vw, 2.4rem); letter-spacing:-.035em; }
     .light-control-panel .detail-heading p { font-size:1.05rem; }
     .light-control-panel .detail-close { width:42px; height:42px; font-size:2rem; }
-    .detail-count { display:inline-flex; align-items:center; gap:9px; padding:8px 13px; margin:0 0 18px; border-radius:999px; color:var(--primary-text-color); background:color-mix(in srgb, var(--primary-text-color) 7%, transparent); font-size:.95rem; font-weight:600; }
+    .detail-count { align-self:flex-start; display:inline-flex; align-items:center; gap:9px; padding:8px 13px; margin:0 0 18px; border-radius:999px; color:var(--primary-text-color); background:color-mix(in srgb, var(--primary-text-color) 7%, transparent); font-size:.95rem; font-weight:600; }
     .detail-count-dot { width:11px; height:11px; border-radius:50%; background:var(--state-light-active-color, var(--warning-color, #ff9800)); }
+    .detail-statistics { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); margin:-5px 0 18px; overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 10%, transparent); border-radius:13px; background:color-mix(in srgb, var(--primary-text-color) 2%, transparent); }
+    .detail-statistics span { display:grid; gap:2px; min-width:0; padding:9px 10px; text-align:center; }
+    .detail-statistics span + span { border-left:1px solid color-mix(in srgb, var(--primary-text-color) 9%, transparent); }
+    .detail-statistics small { overflow:hidden; color:var(--secondary-text-color); font-size:.7rem; font-weight:600; line-height:1.1; text-overflow:ellipsis; text-transform:uppercase; white-space:nowrap; }
+    .detail-statistics strong { overflow:hidden; color:var(--primary-text-color); font-size:.98rem; font-variant-numeric:tabular-nums; line-height:1.1; text-overflow:ellipsis; white-space:nowrap; }
     .detail-all-lights { display:flex; align-items:center; gap:14px; padding:15px 18px; margin-bottom:18px; border:1px solid color-mix(in srgb, var(--primary-text-color) 10%, transparent); border-radius:16px; background:color-mix(in srgb, var(--primary-text-color) 3%, transparent); }
     .detail-icon-badge { display:grid; flex:none; place-items:center; width:50px; height:50px; border-radius:50%; color:var(--secondary-text-color); background:color-mix(in srgb, var(--primary-text-color) 6%, transparent); }
     .detail-icon-badge.active { color:var(--state-light-active-color, var(--warning-color, #ff9800)); }
@@ -1241,7 +1430,7 @@ export class AreaGlanceCard extends LitElement {
     .detail-all-copy strong, .detail-all-copy small { display:block; }
     .detail-all-copy strong { font-size:1.05rem; }
     .detail-all-copy small { margin-top:3px; color:var(--secondary-text-color); }
-    .light-control-panel .detail-entities { gap:0; max-height:47vh; border:1px solid color-mix(in srgb, var(--primary-text-color) 11%, transparent); border-radius:16px; background:color-mix(in srgb, var(--primary-text-color) 1.5%, transparent); }
+    .light-control-panel .detail-entities { flex:1 1 auto; min-height:0; gap:0; max-height:none; border:1px solid color-mix(in srgb, var(--primary-text-color) 11%, transparent); border-radius:16px; background:color-mix(in srgb, var(--primary-text-color) 1.5%, transparent); overscroll-behavior:contain; touch-action:pan-y; }
     .light-control-panel .detail-entity { gap:14px; min-height:76px; padding:12px 18px; border-radius:0; }
     .light-control-panel .detail-entity + .detail-entity { border-top:1px solid color-mix(in srgb, var(--primary-text-color) 10%, transparent); }
     .light-control-panel .detail-entity-main { padding:0; border-radius:7px; }
@@ -1250,8 +1439,8 @@ export class AreaGlanceCard extends LitElement {
     .light-control-panel .detail-entity small { font-size:.9rem; }
     .light-control-panel .detail-control { width:56px; height:32px; }
     .light-control-panel .detail-toggle-thumb { width:26px; height:26px; }
-    @media (max-width: 500px) { .detail-sheet { width:calc(100vw - 20px); max-height:84vh; border-radius:20px; } .light-control-panel { padding:22px 18px; } .light-control-panel .detail-entity { padding:11px 13px; gap:11px; } .light-control-panel .detail-icon-badge { width:44px; height:44px; } .light-control-panel .detail-icon-badge ha-icon { width:24px; height:24px; } }
-    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:clamp(88px, 25%, 108px) minmax(0, 1fr); padding:7px 8px; } .title { font-size:min(calc(var(--area-glance-title-size, 1.8rem) * var(--area-glance-title-scale, 1)), 1.48rem); } .status { font-size:calc(var(--area-glance-status-size, .85rem) * var(--area-glance-status-scale, 1)); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .label { margin-top:1px; } }
+    @media (max-width: 500px) { .detail-sheet { width:calc(100vw - 20px); max-height:84dvh; border-radius:20px; } .detail-sheet.aggregate-sheet.scrollable-sheet { height:84dvh; } .aggregate-panel { padding:22px 18px; } .detail-aggregate-entity { padding:10px 12px; gap:11px; } .light-control-panel { padding:22px 18px; } .light-control-panel .detail-entity { padding:11px 13px; gap:11px; } .light-control-panel .detail-icon-badge { width:44px; height:44px; } .light-control-panel .detail-icon-badge ha-icon { width:24px; height:24px; } }
+    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:clamp(88px, 25%, 108px) minmax(0, 1fr); padding:7px 8px; } .layout.area-icon-layout { grid-template-columns:clamp(130px, 31%, 160px) minmax(0, 1fr); padding-inline:9px; } .summary.with-area-icon { grid-template-columns:37px minmax(0, 1fr); gap:7px; } .area-icon { width:37px; height:37px; } .area-icon ha-icon { width:22px; height:22px; } .title { font-size:min(calc(var(--area-glance-title-size, 1.8rem) * var(--area-glance-title-scale, 1)), calc(1.48rem * var(--area-glance-title-scale, 1))); } .status { font-size:calc(var(--area-glance-status-size, .85rem) * var(--area-glance-status-scale, 1)); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .label { margin-top:1px; } }
   `;
 }
 
@@ -1368,8 +1557,18 @@ export class AreaGlanceCardEditor extends LitElement {
   private _shadowChanged(event: Event) {
     this._change({ appearance: { ...this._config.appearance, shadow: (event.target as HTMLInputElement).checked } });
   }
+  private _textWeightChanged(event: Event) {
+    this._change({ appearance: { ...this._config.appearance, text_weight: (event.target as HTMLSelectElement).value as "bold" | "regular" | "light", style: undefined } });
+  }
+  private _areaIconVisibilityChanged(event: Event) {
+    this._change({ appearance: { ...this._config.appearance, show_area_icon: (event.target as HTMLInputElement).checked } });
+  }
+  private _areaIconChanged(event: Event) {
+    const area_icon = this._pickerValue(event);
+    this._change({ appearance: { ...this._config.appearance, area_icon: area_icon || undefined } });
+  }
   private _textScaleChanged(key: "title" | "status" | "value" | "label", event: Event) {
-    const value = Math.max(80, Math.min(135, Number((event.target as HTMLInputElement).value)));
+    const value = Math.max(75, Math.min(160, Number((event.target as HTMLInputElement).value)));
     const textScale = { ...this._config.appearance?.text_scale, [key]: value };
     if (value === 100) delete textScale[key];
     this._change({ appearance: { ...this._config.appearance, text_scale: Object.keys(textScale).length ? textScale : undefined } });
@@ -1908,11 +2107,14 @@ export class AreaGlanceCardEditor extends LitElement {
       </details>
       <details class="settings"><summary>Card appearance</summary>
         <label>Size<select .value=${this._config.height ?? "slim"} @change=${this._heightChanged}><option value="slim">Slim (default)</option><option value="compact">Compact</option><option value="standard">Medium</option><option value="comfortable">Tall</option></select></label>
+        <label class="checkbox"><input type="checkbox" .checked=${this._config.appearance?.show_area_icon === true} @change=${this._areaIconVisibilityChanged}> Show area icon</label>
+        ${this._config.appearance?.show_area_icon === true ? html`<ha-icon-picker label="Area icon (automatic by default)" .value=${this._config.appearance?.area_icon ?? ""} placeholder="mdi:map-marker-radius-outline" @value-changed=${this._areaIconChanged}></ha-icon-picker><p class="slot-hint">The icon is inferred from the area or profile. Set one here only when you want to override it.</p>` : nothing}
         <label>Colour style<select .value=${appearancePreset} @change=${this._appearancePresetChanged}><option value="theme">Use dashboard theme</option><option value="light">Light</option><option value="slate">Slate</option><option value="charcoal">Dark</option><option value="custom">Custom background</option></select></label>
         ${appearancePreset === "custom" ? html`<label>Background colour <input type="color" .value=${this._config.appearance?.background ?? "#353c45"} @input=${this._customBackgroundChanged}></label>` : nothing}
         <label class="checkbox"><input type="checkbox" .checked=${this._config.appearance?.shadow !== false} @change=${this._shadowChanged}> Show drop shadow</label>
-        <details class="typography"><summary>Text size</summary><p class="slot-hint">Applies across the whole card. The default is 100%.</p>
-          ${([ ["title", "Header"], ["status", "Header status"], ["value", "Insight values"], ["label", "Insight labels"] ] as const).map(([key, label]) => html`<div class="text-scale-row"><label>${label}<input type="range" min="80" max="135" step="5" .value=${String(textScale[key] ?? 100)} @input=${(event: Event) => this._textScaleChanged(key, event)}></label><output>${textScale[key] ?? 100}%</output></div>`)}
+        <details class="typography"><summary>Text size and weight</summary><p class="slot-hint">Applies across the whole card. The default is 100% with bold text. Choose 75–160%; long values still shrink or truncate at very narrow widths to keep the band intact.</p>
+          <label>Text weight<select .value=${this._config.appearance?.text_weight ?? (this._config.appearance?.style === "light" ? "light" : "bold")} @change=${this._textWeightChanged}><option value="bold">Bold (default)</option><option value="regular">Regular</option><option value="light">Light</option></select></label>
+          ${([ ["title", "Header"], ["status", "Header status"], ["value", "Insight values"], ["label", "Insight labels"] ] as const).map(([key, label]) => html`<div class="text-scale-row"><label>${label}<input type="range" min="75" max="160" step="1" .value=${String(textScale[key] ?? 100)} @input=${(event: Event) => this._textScaleChanged(key, event)}></label><output>${textScale[key] ?? 100}%</output></div>`)}
           ${Object.keys(textScale).length ? html`<button class="reset-membership" @click=${this._resetTextScale}>Reset text sizes</button>` : nothing}
         </details>
       </details>

@@ -145,6 +145,14 @@ export interface AreaGlanceConfig extends ActionConfig {
   profile?: "auto" | "room" | "media" | "battery" | "energy" | "house" | "security";
   appearance?: {
     preset?: "theme" | "light" | "slate" | "charcoal" | "custom";
+    /** Shared typography weight for the title and insight text. */
+    text_weight?: "bold" | "regular" | "light";
+    /** @deprecated Replaced by text_weight. Retained so existing card YAML keeps its typography. */
+    style?: "bold" | "light";
+    /** Show an inferred area/profile icon in the header. Disabled by default. */
+    show_area_icon?: boolean;
+    /** Optional MDI override for the Light-style header icon. */
+    area_icon?: string;
     background?: string;
     shadow?: boolean;
     /** Global percentage adjustments, deliberately shared by every insight. */
