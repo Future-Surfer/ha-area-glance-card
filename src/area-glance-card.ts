@@ -254,8 +254,8 @@ const isSignalActive = (signal: AreaSignal, entityId: string, state: EntityState
       : signal === "locks" ? entityId.startsWith("binary_sensor.") ? state.state === "on" : ["unlocked", "unlocking", "jammed"].includes(state.state)
       : state.state === "on";
 
-const includedEntityIds = (metric: MetricConfig, candidates: string[]): string[] => {
-  const membership = metric.membership;
+const includedEntityIds = (config: Pick<MetricConfig, "membership">, candidates: string[]): string[] => {
+  const membership = config.membership;
   if (membership?.mode === "selected_only") {
     const selected = new Set(membership.include ?? []);
     return candidates.filter((entityId) => selected.has(entityId));
@@ -423,15 +423,17 @@ export class AreaGlanceCard extends LitElement {
     return { entities, active, latest };
   }
 
-  private _securitySummary(area = this._config?.area): SecuritySummary {
-    const alarms = this._areaEntities(area)
+  private _securitySummary(area = this._config?.area, membership?: StatusConfig["membership"]): SecuritySummary {
+    const membershipMetric = (preset: MetricPreset): MetricConfig => ({ preset, source: "area", membership });
+    const alarmCandidates = this._areaEntities(area)
       .map((entityId) => ({ entityId, state: this.hass?.states[entityId] }))
       .filter((entry): entry is { entityId: string; state: EntityState } => entry.state !== undefined && !UNAVAILABLE.has(entry.state.state) && isAlarmEntity(entry.entityId));
+    const alarmIds = new Set(includedEntityIds(membershipMetric("alarm"), alarmCandidates.map((entry) => entry.entityId)));
     return {
-      alarms,
-      doors: this._areaSignalSummary(area, "doors"),
-      windows: this._areaSignalSummary(area, "windows"),
-      locks: this._areaSignalSummary(area, "locks"),
+      alarms: alarmCandidates.filter((entry) => alarmIds.has(entry.entityId)),
+      doors: this._areaSignalSummary(area, "doors", membershipMetric("doors")),
+      windows: this._areaSignalSummary(area, "windows", membershipMetric("windows")),
+      locks: this._areaSignalSummary(area, "locks", membershipMetric("locks")),
     };
   }
 
@@ -722,9 +724,9 @@ export class AreaGlanceCard extends LitElement {
 
   private _status() {
     const configuredStatus = this._config?.status;
-    const config = configuredStatus ?? {};
+    const config: StatusConfig = configuredStatus ?? {};
     if (config.source === "security") {
-      const summary = this._securitySummary(config.area);
+      const summary = this._securitySummary(config.area, config.membership);
       const triggered = summary.alarms.find((entry) => isAlarmTriggered(entry.state));
       if (triggered) return { line: "Alarm triggered", age: "", color: config.active_color ?? "var(--error-color, #db4437)" };
       const openCount = summary.doors.active.length + summary.windows.active.length;
@@ -741,7 +743,7 @@ export class AreaGlanceCard extends LitElement {
     if (signal === "motion") {
       const area = config.area ?? this._config?.area;
       if (!area && this._config?.profile !== "house") return { line: "", age: "", color: "var(--disabled-text-color)" };
-      const summary = this._areaSignalSummary(area, signal);
+      const summary = this._areaSignalSummary(area, signal, { preset: signal, source: "area", membership: config.membership });
       if (!summary.entities.length || !summary.latest) return { line: "", age: "", color: "var(--disabled-text-color)" };
       const active = Boolean(summary.active.length);
       return {
@@ -753,20 +755,20 @@ export class AreaGlanceCard extends LitElement {
     if (signal === "doors") {
       const area = config.area ?? this._config?.area;
       if (!area && this._config?.profile !== "house") return { line: "", age: "", color: "var(--disabled-text-color)" };
-      const summary = this._areaSignalSummary(area, signal);
+      const summary = this._areaSignalSummary(area, signal, { preset: signal, source: "area", membership: config.membership });
       if (!summary.entities.length) return { line: "", age: "", color: "var(--disabled-text-color)" };
       const color = summary.active.length ? (config.active_color ?? "var(--warning-color, #e0af00)") : (config.inactive_color ?? "var(--success-color, #2eaa45)");
       if (!summary.active.length) return { line: config.inactive_text ?? "All doors", age: "closed", color };
       return { line: `${summary.active.length} door${summary.active.length === 1 ? "" : "s"} open`, age: "", color };
     }
     if (signal === "presence") {
-      const summary = this._areaSignalSummary(config.area ?? this._config?.area, signal);
+      const summary = this._areaSignalSummary(config.area ?? this._config?.area, signal, { preset: signal, source: "area", membership: config.membership });
       if (!summary.entities.length) return { line: "", age: "", color: "var(--disabled-text-color)" };
       const active = Boolean(summary.active.length);
       return { line: active ? (config.active_text ?? "Occupied") : (config.inactive_text ?? "Clear"), age: "", color: active ? (config.active_color ?? "var(--success-color, #2eaa45)") : (config.inactive_color ?? "var(--disabled-text-color)") };
     }
     if (signal === "windows" || signal === "leaks") {
-      const summary = this._areaSignalSummary(config.area ?? this._config?.area, signal);
+      const summary = this._areaSignalSummary(config.area ?? this._config?.area, signal, { preset: signal, source: "area", membership: config.membership });
       if (!summary.entities.length) return { line: "", age: "", color: "var(--disabled-text-color)" };
       const active = Boolean(summary.active.length);
       const activeText = signal === "windows" ? `${summary.active.length} window${summary.active.length === 1 ? "" : "s"} open` : summary.active.length > 1 ? `${summary.active.length} leaks` : "Leak detected";
@@ -880,7 +882,7 @@ export class AreaGlanceCard extends LitElement {
     const status = this._config?.status;
     if (status?.source === "security") {
       const area = status.area ?? this._config?.area;
-      const summary = this._securitySummary(area);
+      const summary = this._securitySummary(area, status.membership);
       this._detail = {
         title: "Security",
         subtitle: area ? `Monitored in ${this._areaName(area) ?? "this area"}` : "Monitored security entities",
@@ -896,7 +898,7 @@ export class AreaGlanceCard extends LitElement {
     this._detail = {
       title: labels[signal],
       subtitle: area ? `Included from ${this._areaName(area) ?? "this area"}` : "Included entities",
-      entities: this._areaSignalSummary(area, signal).entities.map((entry) => entry.entityId),
+      entities: this._areaSignalSummary(area, signal, { preset: signal, source: "area", membership: status.membership }).entities.map((entry) => entry.entityId),
       emptyMessage: "No compatible entities are currently contributing to this status.",
     };
   }
@@ -1093,7 +1095,8 @@ export class AreaGlanceCardEditor extends LitElement {
     const previous = this._config.status;
     const aggregateSource = source !== "entity";
     const action = !aggregateSource && previous?.action === "status-details" ? "more-info" : aggregateSource && previous?.action === "more-info" ? "status-details" : previous?.action;
-    this._change({ status: { ...previous, source, action, ...(source === "entity" ? {} : { entity: undefined }) } });
+    const { membership: _membership, ...withoutMembership } = previous ?? {};
+    this._change({ status: { ...withoutMembership, source, action, ...(source === "entity" ? {} : { entity: undefined }) } });
   }
   private _statusEnabledChanged(event: Event) {
     const enabled = (event.target as HTMLInputElement).checked;
@@ -1123,6 +1126,28 @@ export class AreaGlanceCardEditor extends LitElement {
   private _statusAreaChanged(event: Event) {
     const source = this._config.status?.source ?? "area_motion";
     this._change({ status: { ...this._config.status, source, area: this._pickerValue(event) || undefined } });
+  }
+  private _statusCandidates(status: StatusConfig): string[] {
+    const area = status.area ?? this._config.area ?? "";
+    const entities = this._entitiesInArea(area);
+    if (status.source === "security") return entities.filter((entityId) => {
+      const state = this.hass?.states[entityId];
+      return isAlarmEntity(entityId) || isSignalEntity("doors", entityId, state) || isSignalEntity("windows", entityId, state) || isSignalEntity("locks", entityId, state);
+    });
+    const signal = statusSignal(status.source);
+    return signal ? entities.filter((entityId) => isSignalEntity(signal, entityId, this.hass?.states[entityId])) : [];
+  }
+  private _statusMembershipEntityChanged(entityId: string, event: Event) {
+    const status = this._config.status;
+    if (!status) return;
+    const included = (event.target as HTMLInputElement).checked;
+    const excluded = new Set(status.membership?.exclude ?? []);
+    if (included) excluded.delete(entityId); else excluded.add(entityId);
+    this._change({ status: { ...status, membership: excluded.size ? { mode: "auto_except", exclude: [...excluded] } : undefined } });
+  }
+  private _resetStatusMembership() {
+    const status = this._config.status;
+    if (status) this._change({ status: { ...status, membership: undefined } });
   }
   private _purpose() {
     const profile = this._config.profile ?? "auto";
@@ -1523,6 +1548,10 @@ export class AreaGlanceCardEditor extends LitElement {
     const statusAction = status?.action ?? "none";
     const usesAreaStatus = statusSource === "security" || Boolean(statusSignal(statusSource));
     const statusAreaLabel = statusSource === "security" ? "Security area (optional)" : statusSource === "area_doors" ? "Door area" : statusSource === "area_windows" ? "Window area" : statusSource === "area_leaks" ? "Area to check for leaks" : statusSource === "area_presence" ? "Presence area" : "Motion area";
+    const statusCandidates = status && usesAreaStatus ? this._statusCandidates(status) : [];
+    const includedStatusEntities = new Set(status ? includedEntityIds(status, statusCandidates) : []);
+    const statusArea = status?.area ?? this._config.area;
+    const wholeHomeStatus = !statusArea;
     const areaLabel = purpose === "energy" ? "Which energy area?" : purpose === "battery" ? "Where is the battery system?" : "Which area?";
     const currentAreaName = this._config.area ? this._areaName(this._config.area) : "this area";
     const headerAction = this._config.header_action?.action ?? "none";
@@ -1631,6 +1660,7 @@ export class AreaGlanceCardEditor extends LitElement {
             <label>Status comes from<select .value=${statusSource} @change=${this._statusSourceChanged}><option value="security">Whole-home security</option><option value="area_presence">Presence in this area</option><option value="area_motion">Motion in this area</option><option value="area_doors">Doors in this area</option><option value="area_windows">Windows in this area</option><option value="area_leaks">Water leaks in this area</option><option value="entity">A specific entity</option></select></label>
             ${statusSource === "security" ? html`<p class="slot-hint">Security checks recognised alarms, doors, windows, and locks. Leave the area empty for the whole home.</p>` : nothing}
             ${usesAreaStatus ? html`<ha-area-picker .hass=${this.hass} .value=${status.area ?? this._config.area ?? ""} .label=${statusAreaLabel} @value-changed=${this._statusAreaChanged}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${status.entity ?? ""} .label="Status entity" allow-custom-entity @value-changed=${(e: Event) => this._change({ status: { ...status, source: "entity", entity: this._pickerValue(e) } })}></ha-entity-picker>`}
+            ${usesAreaStatus ? html`<details class="membership"><summary>${wholeHomeStatus ? "Exclude entities from this home" : "Exclude entities from this area"}</summary><p class="slot-hint">New compatible entities are included automatically. Uncheck anything you want to leave out of this status.</p>${statusCandidates.length ? html`<div class="membership-list">${statusCandidates.map((entityId) => html`<label class="member"><input type="checkbox" .checked=${includedStatusEntities.has(entityId)} @change=${(e: Event) => this._statusMembershipEntityChanged(entityId, e)}><span><strong>${this._entityName(entityId)}</strong><small>${entityId} · ${this.hass?.states[entityId]?.state ?? "unknown"}</small></span></label>`)}</div>` : html`<p class="slot-hint">No compatible entities are currently available for this status.</p>`}${status.membership ? html`<button class="reset-membership" @click=${this._resetStatusMembership}>Reset to automatic membership</button>` : nothing}</details>` : nothing}
             <label>When the status is tapped<select .value=${statusAction} @change=${this._statusActionChanged}><option value="none">Do nothing</option>${usesAreaStatus ? html`<option value="status-details">Show matching entities</option><option value="area-details">Show area details</option>` : html`<option value="more-info">Show entity details</option>`}<option value="navigate">Navigate to a dashboard page</option></select></label>
             ${statusAction === "navigate" ? html`<label>Dashboard path <input .value=${status.navigation_path ?? ""} placeholder="/dashboard/room" @input=${this._statusNavigationChanged}></label>` : nothing}
             ${statusSource === "security" ? nothing : statusSource === "area_doors" ? html`<p class="slot-hint">Closed doors show a green summary; open doors show a clear count.</p>` : statusSource === "area_windows" ? html`<p class="slot-hint">Closed windows show a green summary; open windows need attention.</p>` : statusSource === "area_leaks" ? html`<p class="slot-hint">Dry is green; a detected leak is red.</p>` : statusSource === "area_presence" ? html`<p class="slot-hint">Presence means an occupancy or presence sensor is active. It is different from recent motion.</p>` : html`

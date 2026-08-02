@@ -25,7 +25,7 @@ The card is not intended to become a generic dashboard layout engine, a templati
 - Strict measurement matching for automatic numeric area insights, with a narrow legacy fallback for classless CO₂ sensors.
 - Header and status actions, plus contributor detail sheets for aggregates.
 - Automatic blind summaries use Home Assistant cover device classes; blinds, shades, shutters, and curtains are included while garage and door covers remain separate.
-- Aggregate insights support automatic exclusions or deliberate selected-only membership, while keeping compatibility checks and contributor sheets truthful.
+- Aggregate insights and area-based header statuses support automatic exclusions, while keeping compatibility checks and contributor sheets truthful.
 - An optional Attention insight reports unavailable entities and available updates for an area or the whole home.
 - A Custom combination insight for power users who need separate main and supporting entities, an icon source, and state-to-colour rules.
 - A whole-home Security profile with conservative alarm, door, window, and lock summaries; it prioritises active issues and never claims unverified coverage.

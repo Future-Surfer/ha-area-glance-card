@@ -54,6 +54,14 @@ export interface ActionConfig {
   confirmation?: string;
 }
 
+/** Membership settings for an automatic area or whole-home aggregate. */
+export interface AggregateMembership {
+  /** `auto_except` keeps future compatible entities included by default. */
+  mode?: "auto_except" | "selected_only";
+  exclude?: string[];
+  include?: string[];
+}
+
 export interface StatusConfig extends ActionConfig {
   source?: "security" | "area_motion" | "area_presence" | "area_doors" | "area_windows" | "area_leaks" | "entity";
   area?: string;
@@ -63,6 +71,8 @@ export interface StatusConfig extends ActionConfig {
   inactive_color?: string;
   show_last_changed?: boolean;
   last_changed_text?: string;
+  /** Exclusions for an area-based status; newly discovered compatible entities remain included. */
+  membership?: AggregateMembership;
 }
 
 export interface MetricConfig extends ActionConfig {
@@ -84,12 +94,7 @@ export interface MetricConfig extends ActionConfig {
   thresholds?: { above?: number; below?: number; color: string }[];
   aggregation?: "median" | "average" | "highest" | "lowest" | "sum";
   /** Controls membership after Home Assistant metadata has identified compatible area entities. */
-  membership?: {
-    /** `auto_except` keeps future compatible entities included by default. */
-    mode?: "auto_except" | "selected_only";
-    exclude?: string[];
-    include?: string[];
-  };
+  membership?: AggregateMembership;
   /** Checks shown by the Attention aggregate. Both are enabled when omitted. */
   attention_types?: ("unavailable" | "updates")[];
   /** Attention can check the card's area or the whole Home Assistant instance. */
