@@ -16,6 +16,7 @@ export type MetricPreset =
   | "locks"
   | "alarm"
   | "camera"
+  | "vacuum"
   | "weather"
   | "clock"
   | "calendar"
@@ -102,6 +103,8 @@ export interface MetricConfig extends ActionConfig {
   invert_value?: boolean;
   /** The primary live value shown by a weather entity. */
   weather_display?: "condition" | "temperature" | "apparent_temperature" | "humidity" | "wind_speed";
+  /** Robot vacuum segments can prioritise the activity state, charge, or chosen cleaning mode. */
+  vacuum_display?: "state" | "battery" | "fan_speed";
   /** Clock segments can show a numeric time or a live analogue clock face. */
   clock_style?: "digital" | "analogue";
   decimals?: number;
@@ -124,7 +127,7 @@ export interface AreaGlanceConfig extends ActionConfig {
   status?: StatusConfig;
   metrics?: MetricConfig[];
   header_action?: ActionConfig;
-  layout?: "header" | "stacked" | "metrics-only";
+  layout?: "header" | "stacked" | "metrics-only" | "tower";
   /** Text alignment is used by the title-above-insights layout. */
   header_alignment?: "left" | "center" | "right";
   /** Leave on Auto for a layout-aware header: beside insights wraps, above insights stays compact. */

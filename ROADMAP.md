@@ -34,7 +34,7 @@ The card is not intended to become a generic dashboard layout engine, a templati
 
 Automatic matching now covers the common area-summary signals with Home Assistant metadata rather than entity-name searches: temperature, humidity, power, COâ‚‚, particulate matter, VOC, AQI, lights, motion/presence, openings, leaks, recognised blind covers, locks, alarms, and update availability. Power accepts the official `power` device class and standard power units, retaining a narrow classless fallback for older integrations. Locks and update availability also accept their legacy binary-sensor device classes.
 
-Broader domains such as vacuum, climate, cameras, and robot vacuums remain intentionally available through **A specific entity** rather than as automatic aggregates. A dedicated **Weather** insight is intentionally entity-led too: it provides a live condition icon plus selected current readings, but never guesses which weather provider a household prefers. Clock and Calendar date are self-contained utilities rather than area aggregates.
+Broader domains such as climate and cameras remain intentionally available through **A specific entity** rather than as automatic aggregates. A dedicated, entity-led **Vacuum** insight shows robot-vacuum activity with a state-aware icon and colour, or its battery or fan speed; it is intentionally not guessed as an automatic room preset. A dedicated **Weather** insight is intentionally entity-led too: it provides a live condition icon plus selected current readings, but never guesses which weather provider a household prefers. Clock and Calendar date are self-contained utilities rather than area aggregates.
 
 Known limits remain explicit: Attention counts affected **entities**, not deduplicated physical devices; and no automatic smoke, gas, CO, or generic-problem aggregate is suggested until its wording and coverage rules can be made as trustworthy as Security's existing signals.
 
@@ -123,13 +123,13 @@ Known limits remain explicit: Attention counts affected **entities**, not dedupl
 
 ### 7. Prescribed expanded layouts
 
-**Status:** Explored; awaiting a visual prototype before implementation.
+**Status:** Insight tower implemented with the card's existing five-insight limit; grid remains awaiting a visual prototype.
 
 **Goal:** Let Area Glance become a larger, still legible summary card without becoming a generic dashboard-layout system.
 
 - Keep the existing compact band as the default and retain its five-insight limit.
 - Add one opt-in **Insight grid** layout: a header above a responsive grid of equal-size insight tiles. It may support two to eight insights, with a small, deliberate column choice rather than per-tile placement.
-- Add one opt-in **Insight tower** layout designed for a single Home Assistant dashboard column: a header followed by vertically arranged, compact insight rows. It should favour scanability over dense metric text.
+- The opt-in **Insight tower** layout is designed for a single Home Assistant dashboard column: a header followed by vertically arranged, compact insight rows. It favours scanability over dense metric text and reuses the existing five-insight limit.
 - Both variants should reuse the existing presets, aggregate membership, contributor sheets, actions, appearance settings, and header alignment. No separate metric model or templating language is needed.
 - Validate both layouts in Card Lab at a narrow phone width, one standard dashboard column, and a wide desktop span before exposing them in the editor.
 

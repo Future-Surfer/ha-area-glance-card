@@ -20,6 +20,7 @@ export const PRESETS: Record<MetricPreset, Preset> = {
   locks: { icon: "mdi:lock", label: "Locks", format: "auto", color: "var(--green-color, #43a047)" },
   alarm: { icon: "mdi:shield-home-outline", label: "Alarm", format: "auto", color: "var(--secondary-text-color)" },
   camera: { icon: "mdi:cctv", label: "Camera", format: "auto", color: "var(--blue-color, #2196f3)" },
+  vacuum: { icon: "mdi:robot-vacuum", label: "Vacuum", format: "auto", color: "var(--secondary-text-color)" },
   weather: { icon: "mdi:weather-partly-cloudy", label: "Weather", format: "auto", color: "var(--blue-color, #2196f3)" },
   clock: { icon: "mdi:clock-outline", label: "Time", format: "auto", color: "var(--primary-color)" },
   calendar: { icon: "mdi:calendar-today", label: "Today", format: "auto", color: "var(--primary-color)" },
