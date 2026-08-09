@@ -44,6 +44,25 @@ Camera previews can be used individually or via the Cameras profile, which selec
 
 ## Roadmap
 
+### Rich insight visualisations
+
+**Goal:** Let an insight use its fixed slot for more than an icon and value when that makes the state meaningfully easier to understand.
+
+- Start with compact, opt-in history visualisations for numeric entity insights: sparkline, columns/bars, and a simple current-versus-range treatment.
+- Keep the band layout stable: a visual may be cropped to its existing insight slot, but must never claim extra width or make neighbouring insights jump.
+- Treat pie/donut displays as an intentionally narrow use case for discrete parts-of-a-whole aggregates such as lights on/off, rather than a generic chart type.
+- Define clear data requirements and graceful fallbacks when Recorder/history is unavailable; no guessed history and no heavy per-card polling.
+- Reuse Home Assistant’s own history/statistics APIs and formatting conventions where possible.
+
+### Thermostat and climate support
+
+**Goal:** Turn the existing generic Climate device display into a purposeful thermostat insight without guessing how a household controls heating.
+
+- Support a selected `climate.*` entity with current temperature, target temperature, HVAC mode, and action/state-aware iconography.
+- Offer a calm default summary, with optional choices for the primary reading rather than exposing every climate attribute at once.
+- Consider safe quick controls only after the display works reliably: mode selection and target adjustment must use Home Assistant’s normal service/action patterns and respect unavailable entities.
+- Do not infer a whole-home thermostat aggregate until the distinction between zones, rooms, and heating systems is communicated honestly.
+
 ### 1. Insight arranging workflow
 
 **Status:** Implemented in the current development build.

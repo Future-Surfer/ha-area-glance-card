@@ -113,6 +113,10 @@ export interface MetricConfig extends ActionConfig {
   domain?: string;
   label?: string;
   icon?: string;
+  /** Optional icons used only when the selected entity is a binary sensor. */
+  icon_on?: string;
+  icon_off?: string;
+  icon_unknown?: string;
   color?: string;
   /** Reverse the sign of a power reading before it is aggregated or displayed. */
   invert_value?: boolean;

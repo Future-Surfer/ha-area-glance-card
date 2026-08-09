@@ -383,12 +383,14 @@ export class AreaGlanceCard extends LitElement {
   private _energyPreferencesHass?: HassLike;
   private _energyPreferencesRequest?: Promise<void>;
   private _clockTimer?: number;
+  private _resizeObserver?: ResizeObserver;
+  private _towerIconMode: "normal" | "compact" | "hidden" = "normal";
   private _metricGesture?: { pointerId: number; metric: MetricConfig; display: MetricDisplay; startX: number; startY: number; held: boolean; timer?: number };
   private _pendingMetricTap?: { metric: MetricConfig; display: MetricDisplay; timer: number };
   private _ignoreMetricClick = false;
 
   static get properties() {
-    return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true } };
+    return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true }, _towerIconMode: { state: true } };
   }
 
   static getConfigElement() {
@@ -435,17 +437,26 @@ export class AreaGlanceCard extends LitElement {
   }
 
   public getCardSize() { return this._gridRows(); }
-  public getGridOptions() { return { columns: 12, min_columns: 6 }; }
+  public getGridOptions() {
+    // Towers are intentionally narrow, single-column cards. Keep their useful
+    // maximum modest while allowing the native Sections editor down to 3 units.
+    if (this._config?.layout === "tower") return { columns: 6, min_columns: 3 };
+    return { columns: 12, min_columns: 6 };
+  }
 
   connectedCallback() {
     super.connectedCallback();
     this._clockTimer = window.setInterval(() => this.requestUpdate(), 30000);
+    this._resizeObserver = new ResizeObserver(() => this._syncTowerIconMode());
+    this._resizeObserver.observe(this);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     if (this._clockTimer !== undefined) window.clearInterval(this._clockTimer);
     this._clockTimer = undefined;
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = undefined;
     this._cancelMetricGesture();
     if (this._pendingMetricTap) window.clearTimeout(this._pendingMetricTap.timer);
     this._pendingMetricTap = undefined;
@@ -555,8 +566,21 @@ export class AreaGlanceCard extends LitElement {
     return { entities, active, latest };
   }
 
+  /**
+   * A Security header is a summary of the visible security insights. When it
+   * has no explicit membership of its own, inherit the matching area insight's
+   * exclusions so “Doors: Closed” cannot sit beside “1 opening”.
+   */
+  private _securityMembership(preset: MetricPreset, area: string | undefined, statusMembership?: StatusConfig["membership"]): StatusConfig["membership"] {
+    if (statusMembership) return statusMembership;
+    const metric = this._config?.metrics?.find((candidate) => candidate.preset === preset
+      && this._metricSource(candidate, preset) === "area"
+      && (candidate.area ?? this._config?.area) === area);
+    return metric?.membership;
+  }
+
   private _securitySummary(area = this._config?.area, membership?: StatusConfig["membership"]): SecuritySummary {
-    const membershipMetric = (preset: MetricPreset): MetricConfig => ({ preset, source: "area", membership });
+    const membershipMetric = (preset: MetricPreset): MetricConfig => ({ preset, source: "area", membership: this._securityMembership(preset, area, membership) });
     const alarmCandidates = this._areaEntities(area)
       .map((entityId) => ({ entityId, state: this.hass?.states[entityId] }))
       .filter((entry): entry is { entityId: string; state: EntityState } => entry.state !== undefined && !UNAVAILABLE.has(entry.state.state) && isAlarmEntity(entry.entityId));
@@ -793,8 +817,10 @@ export class AreaGlanceCard extends LitElement {
     if (preset === "clock") return this._clockMetric(metric, metric.label ?? defaults.label, metric.icon ?? defaults.icon);
     if (preset === "calendar") return this._calendarMetric(metric, metric.label ?? defaults.label, metric.icon ?? defaults.icon);
     const state = metric.entity ? this.hass?.states[metric.entity] : undefined;
-    if (metric.hide_unavailable && state && UNAVAILABLE.has(state.state)) return undefined;
     const entityDomain = metric.entity?.split(".")[0];
+    // An explicit Unknown icon is also an explicit request to keep that binary
+    // sensor visible when its integration has no usable state.
+    if (metric.hide_unavailable && state && UNAVAILABLE.has(state.state) && !(entityDomain === "binary_sensor" && metric.icon_unknown)) return undefined;
     const devicePresentation = entityDomain === "media_player" ? { icon: "mdi:television", label: "Media" }
       : entityDomain === "vacuum" ? { icon: "mdi:robot-vacuum", label: "Vacuum" }
       : entityDomain === "camera" ? { icon: "mdi:cctv", label: "Camera" }
@@ -812,9 +838,16 @@ export class AreaGlanceCard extends LitElement {
       ? devicePresentation?.icon ?? String(state?.attributes.icon ?? defaults.icon)
       : metric.icon ?? defaults.icon;
     const iconState = metric.icon_entity ? this.hass?.states[metric.icon_entity] : undefined;
-    const icon = preset === "custom" && typeof iconState?.attributes.icon === "string"
+    const baseIcon = preset === "custom" && typeof iconState?.attributes.icon === "string"
       ? iconState.attributes.icon
       : configuredIcon;
+    const binaryState = state?.state.toLowerCase();
+    const icon = entityDomain === "binary_sensor"
+      ? !binaryState || UNAVAILABLE.has(binaryState) ? metric.icon_unknown ?? baseIcon
+        : binaryState === "on" || binaryState === "true" ? metric.icon_on ?? baseIcon
+          : binaryState === "off" || binaryState === "false" ? metric.icon_off ?? baseIcon
+            : metric.icon_unknown ?? baseIcon
+      : baseIcon;
     const customLabel = preset === "custom" ? this._customSupportingText(metric, label) : label;
 
     const source = this._metricSource(metric, preset);
@@ -979,6 +1012,10 @@ export class AreaGlanceCard extends LitElement {
     const kind = config?.action ?? "more-info";
     const entity = config?.entity ?? fallbackEntity;
     if (kind === "none") return;
+    // Home Assistant cannot open a more-info dialog without an entity. This
+    // also keeps clicks on an otherwise inert card from producing a transient
+    // "no entity provided" message.
+    if (kind === "more-info" && !entity) return;
     if (config?.confirmation && !window.confirm(config.confirmation)) return;
     if (kind === "area-details") {
       this._openAreaDetails();
@@ -1181,7 +1218,13 @@ export class AreaGlanceCard extends LitElement {
     this._metricAction(metric, display, metric, true, "tap");
   }
 
-  private _headerClicked() { this._runAction(this._config?.header_action ?? this._config); }
+  private _headerClicked() {
+    // A bare card click is not an action. Header behaviour is opt-in through
+    // the editor's "When the header is tapped" setting.
+    const action = this._config?.header_action;
+    if (!action || action.action === "none") return;
+    this._runAction(action);
+  }
   private _statusClicked(event: Event) {
     event.stopPropagation();
     const status = this._config?.status;
@@ -1357,7 +1400,17 @@ export class AreaGlanceCard extends LitElement {
 
   private _closeDetail() { this._detail = undefined; }
 
+  /** Keep tower icon density coherent: every insight changes together. */
+  private _syncTowerIconMode() {
+    const width = this.renderRoot.querySelector<HTMLElement>("ha-card")?.getBoundingClientRect().width ?? this.getBoundingClientRect().width;
+    const next = this._config?.layout !== "tower" || width >= 280
+      ? "normal"
+      : width >= 140 ? "compact" : "hidden";
+    if (next !== this._towerIconMode) this._towerIconMode = next;
+  }
+
   protected updated(changed: PropertyValues<this>) {
+    this._syncTowerIconMode();
     if (!changed.has("_detail" as never)) return;
     const dialog = this.renderRoot.querySelector<HTMLDialogElement>(".detail-sheet");
     if (this._detail && dialog && !dialog.open) dialog.showModal();
@@ -1386,7 +1439,7 @@ export class AreaGlanceCard extends LitElement {
     const showAreaIcon = appearance?.show_area_icon === true;
     return html`
       <ha-card class=${`${this._config.theme === "dark" ? "force-dark" : this._config.theme === "light" ? "force-light" : ""}${textWeight !== "bold" ? ` ${textWeight}-weight` : ""}${noShadow ? " no-shadow" : ""}${headerClickable ? " clickable" : ""}`} style=${`--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);${background ? `--area-glance-card-background:${background}` : ""}`} @click=${this._headerClicked}>
-        <section class=${showHeader ? `layout${this._config.layout === "stacked" ? " stacked" : ""}${this._config.layout === "tower" ? " tower" : ""}${showAreaIcon ? " area-icon-layout" : ""}` : "layout metrics-only"} style=${this._layoutStyle(metrics.length)}>
+        <section class=${showHeader ? `layout${this._config.layout === "stacked" ? " stacked" : ""}${this._config.layout === "tower" ? ` tower tower-icons-${this._towerIconMode}` : ""}${showAreaIcon ? " area-icon-layout" : ""}` : "layout metrics-only"} style=${this._layoutStyle(metrics.length)}>
           ${showHeader ? html`<div class=${`summary align-${headerAlignment}${showAreaIcon ? " with-area-icon" : ""}`} style=${`--area-glance-title-fit:${titleFit}`}>
               ${showAreaIcon ? html`<span class="area-icon" aria-hidden="true"><ha-icon icon=${this._headerAreaIcon(title)}></ha-icon></span>` : nothing}
               <span class="summary-copy"><span class=${`title ${titleLines}`}>${title}</span>
@@ -1493,12 +1546,20 @@ export class AreaGlanceCard extends LitElement {
     .light-weight .value { font-weight:500; letter-spacing:-.012em; }
     .light-weight .label { font-weight:350; }
     .layout.stacked .metric:first-child::before, .layout.metrics-only .metric:first-child::before { display:none; }
-    .layout.tower .metric { display:grid; grid-template-columns:calc(var(--area-glance-icon-size, 24px) + 10px) minmax(0, 1fr); grid-template-rows:auto auto; column-gap:8px; justify-content:start; align-content:center; text-align:left; padding-inline:8px; }
+    .layout.tower .metric { display:grid; grid-template-columns:calc(var(--area-glance-tower-icon-size, var(--area-glance-icon-size, 24px)) + 10px) minmax(0, 1fr); grid-template-rows:auto auto; column-gap:8px; justify-content:start; align-content:center; text-align:left; padding-inline:8px; }
     .layout.tower .metric::before { left:8px; top:0; width:calc(100% - 16px); height:1px; }
     .layout.tower .metric:first-child::before { display:none; }
     .layout.tower .metric ha-icon, .layout.tower .metric .analogue-clock, .layout.tower .metric .calendar-date { grid-row:1 / span 2; grid-column:1; margin:0; justify-self:center; }
     .layout.tower .metric .value { grid-row:1; grid-column:2; justify-content:flex-start; }
     .layout.tower .metric .label { grid-row:2; grid-column:2; margin-top:0; }
+    .layout.tower.tower-icons-compact { --area-glance-tower-icon-size:18px; }
+    .layout.tower.tower-icons-compact .metric { column-gap:7px; }
+    .layout.tower.tower-icons-compact .metric ha-icon { width:var(--area-glance-tower-icon-size); height:var(--area-glance-tower-icon-size); }
+    .layout.tower.tower-icons-compact .metric .analogue-clock { width:calc(var(--area-glance-tower-icon-size) + 5px); height:calc(var(--area-glance-tower-icon-size) + 5px); }
+    .layout.tower.tower-icons-compact .metric .calendar-date { width:calc(var(--area-glance-tower-icon-size) + 10px); min-height:calc(var(--area-glance-tower-icon-size) + 10px); }
+    .layout.tower.tower-icons-hidden .metric { grid-template-columns:minmax(0, 1fr); padding-inline:10px; }
+    .layout.tower.tower-icons-hidden .metric ha-icon, .layout.tower.tower-icons-hidden .metric .analogue-clock, .layout.tower.tower-icons-hidden .metric .calendar-date { display:none !important; }
+    .layout.tower.tower-icons-hidden .metric .value, .layout.tower.tower-icons-hidden .metric .label { grid-column:1; }
     .metric:hover { background:color-mix(in srgb, var(--area-glance-accent) 8%, transparent); }
     ha-icon { color:var(--area-glance-accent); width:var(--area-glance-icon-size, 24px); height:var(--area-glance-icon-size, 24px); margin-bottom:2px; flex:none; }
     .analogue-clock { position:relative; width:calc(var(--area-glance-icon-size, 24px) + 6px); height:calc(var(--area-glance-icon-size, 24px) + 6px); margin-bottom:2px; border:2px solid currentColor; border-radius:50%; box-sizing:border-box; flex:none; }
@@ -1954,6 +2015,9 @@ export class AreaGlanceCardEditor extends LitElement {
       delete updated.secondary_entity;
       delete updated.secondary_text;
       delete updated.icon_entity;
+      delete updated.icon_on;
+      delete updated.icon_off;
+      delete updated.icon_unknown;
       delete updated.color_entity;
       delete updated.color_rules;
       delete updated.thresholds;
@@ -2188,9 +2252,13 @@ export class AreaGlanceCardEditor extends LitElement {
       <section class="setup">
         <span class="section-label">What does this card show?</span>
         <div class="purpose-grid">
-          ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"], ["security", "Security", "Home security"], ["cameras", "Cameras", "Live camera feeds"] ] as const).map(([value, title, description]) => html`<button class="purpose ${value === "security" || value === "cameras" ? "security" : ""} ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
+          ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"], ["security", "Security", "Home security"], ["cameras", "Cameras", "Live camera feeds"] ] as const).map(([value, title, description]) => html`<button class="purpose ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
         </div>
         ${purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "cameras" ? html`<p class="applied">${purpose === "energy" ? "System-wide live insights come from the Energy Dashboard setup. If it is not configured, add your own entity insights below." : purpose === "security" ? "Whole-home security suggestions are applied." : purpose === "cameras" ? "Up to three feeds are selected: one lower-resolution camera per device where Home Assistant exposes that information." : "Whole-home suggestions are applied."} You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._config.area ?? ""} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
+      </section>
+      <section class="card-layout">
+        <span class="section-label">What layout does this card have?</span>
+        <label>Card layout<select .value=${this._config.layout ?? "header"} @change=${this._layoutChanged}><option value="header">Title beside insights (default)</option><option value="stacked">Title above insights</option><option value="tower">Insight tower (one column)</option><option value="metrics-only">Insights only</option></select></label>
       </section>
       <section class="insights"><h3>Insights</h3><p class="hint">Keep up to five. They resize automatically to fit the card.</p>
       ${metrics.map((metric, index) => {
@@ -2205,6 +2273,7 @@ export class AreaGlanceCardEditor extends LitElement {
         const usesAggregate = usesArea || usesSelectedEntities;
         const selfContained = preset === "clock" || preset === "calendar";
         const requiresEntity = source === "entity" && !selfContained;
+        const isBinarySensor = requiresEntity && metric.entity?.startsWith("binary_sensor.");
         const sourceLabel = metric.energy_source ? "Energy Dashboard" : usesArea ? (wholeHomeAggregate ? "Whole home" : preset === "attention" ? "Area health" : preset === "lights" ? "Area count" : "Whole area") : usesSelectedEntities ? "Selected entities" : selfContained ? "Live date & time" : preset === "people_home" ? "Home zone" : "One entity";
         const contributorHint = this._contributorHint(metric, preset, usesArea);
         const candidates = usesArea ? this._aggregateCandidates(metric, preset) : [];
@@ -2261,6 +2330,7 @@ export class AreaGlanceCardEditor extends LitElement {
         <details class="more-options"><summary>Fine tuning (optional)</summary>
           ${preset !== "custom" ? html`<label>Label source<select .value=${metric.label_mode ?? (metric.label && metric.label !== PRESETS[preset].label && !(preset === "temperature" && metric.label === "Temperature") ? "custom" : "preset")} @change=${(e: Event) => { const labelMode = (e.target as HTMLSelectElement).value as MetricConfig["label_mode"]; this._updateMetric(index, { label_mode: labelMode, ...(labelMode === "preset" ? { label: undefined } : {}) }); }}><option value="preset">Preset label</option>${requiresEntity ? html`<option value="entity">Entity name</option>` : nothing}<option value="custom">Custom label</option></select></label>` : nothing}
           <div class="two"><label>${preset === "custom" ? "Supporting text fallback" : "Custom label"} <input .value=${preset === "custom" ? metric.secondary_text ?? "" : metric.label ?? ""} placeholder=${PRESETS[preset].label} @input=${(e: Event) => this._updateMetric(index, preset === "custom" ? { secondary_text: (e.target as HTMLInputElement).value || undefined } : { label_mode: "custom", label: (e.target as HTMLInputElement).value || undefined })}></label><ha-icon-picker label="Icon" .value=${metric.icon ?? ""} .placeholder=${PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon: this._pickerValue(e) })}></ha-icon-picker></div>
+          ${isBinarySensor ? html`<details class="binary-icons"><summary>Binary sensor icons</summary><p class="slot-hint">Optional overrides for the sensor's current state. Leave a field empty to use the normal insight icon.</p><div class="three"><ha-icon-picker label="On / true" .value=${metric.icon_on ?? ""} .placeholder=${metric.icon ?? PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon_on: this._pickerValue(e) || undefined })}></ha-icon-picker><ha-icon-picker label="Off / false" .value=${metric.icon_off ?? ""} .placeholder=${metric.icon ?? PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon_off: this._pickerValue(e) || undefined })}></ha-icon-picker><ha-icon-picker label="Unknown" .value=${metric.icon_unknown ?? ""} .placeholder=${metric.icon ?? PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon_unknown: this._pickerValue(e) || undefined })}></ha-icon-picker></div></details>` : nothing}
           ${preset === "attention" ? html`<label>Colour <input .value=${metric.color ?? ""} placeholder="var(--warning-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value || undefined })}></label><label class="checkbox"><input type="checkbox" .checked=${metric.show_icon !== false} @change=${(e: Event) => this._updateMetric(index, { show_icon: (e.target as HTMLInputElement).checked })}> Show icon</label>` : html`<div class="two"><label>${preset === "custom" ? "Fallback colour" : "Colour"} <input .value=${metric.color ?? ""} placeholder="var(--primary-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value || undefined })}></label>${supportsDecimals ? unitOptions ? html`<label>Display unit<select .value=${metric.unit ?? ""} @change=${(e: Event) => this._updateMetric(index, { unit: (e.target as HTMLSelectElement).value || undefined })}>${unitOptions.map(([value, name]) => html`<option value=${value}>${name}</option>`)}</select></label>` : html`<label>Unit override <input .value=${metric.unit ?? ""} @input=${(e: Event) => this._updateMetric(index, { unit: (e.target as HTMLInputElement).value || undefined })}></label>` : nothing}</div>
           ${preset === "power" ? html`<label class="checkbox"><input type="checkbox" .checked=${metric.invert_value ?? false} @change=${(e: Event) => this._updateMetric(index, { invert_value: (e.target as HTMLInputElement).checked || undefined })}> Invert the power direction</label><p class="slot-hint">Use this when an import or export reading has the opposite sign to the one you want to show.</p>` : nothing}
           <div class=${supportsDecimals ? "three" : "two"}>${supportsDecimals ? html`<label>Decimal places <input type="number" min="0" max="4" .value=${metric.decimals?.toString() ?? ""} placeholder="Automatic" @input=${(e: Event) => { const value = (e.target as HTMLInputElement).value; this._updateMetric(index, { decimals: value === "" ? undefined : Math.max(0, Math.min(4, Number(value))) }); }}></label>` : nothing}${supportsDecimals ? html`<label class="checkbox"><input type="checkbox" .checked=${metric.show_unit !== false} @change=${(e: Event) => this._updateMetric(index, { show_unit: (e.target as HTMLInputElement).checked })}> Show unit</label>` : nothing}<label class="checkbox"><input type="checkbox" .checked=${metric.show_icon !== false} @change=${(e: Event) => this._updateMetric(index, { show_icon: (e.target as HTMLInputElement).checked })}> Show icon</label></div>`}
@@ -2276,7 +2346,6 @@ export class AreaGlanceCardEditor extends LitElement {
       </section>
       <details class="settings">
         <summary>Header</summary>
-        <label>Card layout<select .value=${this._config.layout ?? "header"} @change=${this._layoutChanged}><option value="header">Title beside insights (default)</option><option value="stacked">Title above insights</option><option value="tower">Insight tower (one column)</option><option value="metrics-only">Insights only</option></select></label>
         ${this._config.layout !== "metrics-only" ? html`
           ${this._config.layout === "stacked" || this._config.layout === "tower" ? html`<label>Header alignment<select .value=${this._config.header_alignment ?? "left"} @change=${(e: Event) => this._change({ header_alignment: (e.target as HTMLSelectElement).value as NonNullable<AreaGlanceConfig["header_alignment"]> })}><option value="left">Left</option><option value="center">Centre</option><option value="right">Right</option></select></label>` : nothing}
           <label>Title <input .value=${this._config.title ?? ""} placeholder=${currentAreaName} @input=${(e: Event) => this._input(e, "title")}></label>
@@ -2316,7 +2385,7 @@ export class AreaGlanceCardEditor extends LitElement {
   }
   static styles = css`
     :host { display:block; } .editor { padding:12px; } h3 { margin:0; } .hint, .slot-hint, .contributor-hint { color:var(--secondary-text-color); margin:4px 0 12px; } .slot-hint, .contributor-hint { font-size:.88rem; } .contributor-hint { padding:7px 9px; border-radius:6px; background:color-mix(in srgb, var(--primary-color) 7%, var(--card-background-color)); } label { display:block; font-weight:500; margin:12px 0; } ha-entity-picker, ha-area-picker { display:block; margin:12px 0; } input, select { box-sizing:border-box; width:100%; padding:8px; margin-top:4px; font:inherit; color:inherit; background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:6px; } button { cursor:pointer; font:inherit; } .setup, .insights { margin-top:18px; } .section-label { display:block; font-weight:600; margin-bottom:8px; } .purpose-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; } .purpose { text-align:left; min-height:62px; padding:10px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; } .purpose.selected { border:2px solid var(--primary-color); background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .purpose strong, .purpose small { display:block; } .purpose small { color:var(--secondary-text-color); font-size:.78rem; margin-top:3px; } .applied { color:var(--secondary-text-color); font-size:.9rem; margin:8px 0; } .suggestion-update { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:10px; margin-top:8px; border-radius:8px; background:color-mix(in srgb, var(--primary-color) 8%, var(--card-background-color)); } .suggestion-update span { font-size:.88rem; } .primary, .add { padding:8px 12px; color:white; background:var(--primary-color); border:0; border-radius:6px; white-space:nowrap; } .advanced-setup, .settings, .insight-editor { border:1px solid var(--divider-color); border-radius:8px; padding:10px; margin-top:12px; } summary { cursor:pointer; font-weight:600; } .advanced-setup summary, .settings summary, .header-fine-tuning summary, .more-options summary, .thresholds summary, .metric-actions summary, .secondary-actions summary { color:var(--secondary-text-color); } .header-fine-tuning { margin-top:12px; padding:10px; border:1px solid var(--divider-color); border-radius:8px; } .header-fine-tuning .slot-hint { margin-bottom:4px; } .insight-editor { padding:0; overflow:hidden; transform:translateY(var(--reorder-shift, 0)); transition:transform 170ms ease, opacity .15s ease, box-shadow .15s ease, border-color .15s ease; will-change:transform; } .insight-editor.dragging { opacity:.22; } .insight-editor.drag-over { border-color:var(--primary-color); box-shadow:0 0 0 2px color-mix(in srgb, var(--primary-color) 24%, transparent); } .insight-editor > summary { display:flex; align-items:center; gap:8px; padding:12px; list-style:none; } .insight-editor > summary::-webkit-details-marker { display:none; } .insight-editor > summary::after { content:"›"; margin-left:auto; color:var(--secondary-text-color); font-size:1.4rem; } .insight-editor[open] > summary::after { transform:rotate(90deg); } .insight-editor ha-icon { width:22px; height:22px; color:var(--primary-color); } .drag-handle { display:inline-grid; place-items:center; width:26px; min-height:32px; margin:-8px 0 -8px -6px; border-radius:5px; color:var(--secondary-text-color); cursor:grab; font-size:1.15rem; letter-spacing:-2px; touch-action:none; user-select:none; } .drag-handle:hover { color:var(--primary-color); background:color-mix(in srgb, var(--primary-color) 9%, transparent); } .drag-handle:active { cursor:grabbing; } .insight-name { min-width:0; flex:1; } .source-pill { padding:3px 6px; border-radius:999px; color:var(--secondary-text-color); background:color-mix(in srgb, var(--secondary-text-color) 12%, transparent); font-size:.72rem; white-space:nowrap; } .insight-fields { padding:0 12px 12px; border-top:1px solid var(--divider-color); } .more-options, .thresholds, .metric-actions, .secondary-actions { margin-top:12px; } .thresholds, .metric-actions { padding:10px; border:1px solid var(--divider-color); border-radius:8px; } .two { display:grid; grid-template-columns:1fr 1fr; gap:8px; } .three { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:8px; align-items:end; } .checkbox { font-weight:400; } .checkbox input { width:auto; margin:0 6px 0 0; vertical-align:middle; } .threshold { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)) auto; gap:8px; align-items:end; margin-top:8px; } .threshold label { margin:0; } .insight-actions, .reorder { display:flex; align-items:center; gap:8px; } .insight-actions { justify-content:space-between; } .reorder button { padding:5px 7px; border:1px solid var(--divider-color); border-radius:5px; color:var(--primary-text-color); background:transparent; } .reorder button:disabled { opacity:.45; cursor:default; } .remove { padding:6px 0; color:var(--error-color); background:transparent; border:0; } .add { margin-top:12px; } @media (max-width:400px) { .purpose-grid, .two, .three, .threshold { grid-template-columns:1fr; } .suggestion-update { align-items:flex-start; flex-direction:column; } }
-    .purpose.security { grid-column:span 2; }
+    .card-layout { margin-top:18px; }
     .custom-rules { margin:14px 0; padding:10px; border:1px solid var(--divider-color); border-radius:8px; }
     .custom-rules .slot-hint { margin-bottom:8px; }
     .color-rule { display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1fr) auto; gap:8px; align-items:end; margin-top:8px; }
