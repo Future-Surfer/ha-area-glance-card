@@ -63,6 +63,21 @@ Camera previews can be used individually or via the Cameras profile, which selec
 - Consider safe quick controls only after the display works reliably: mode selection and target adjustment must use Home Assistant’s normal service/action patterns and respect unavailable entities.
 - Do not infer a whole-home thermostat aggregate until the distinction between zones, rooms, and heating systems is communicated honestly.
 
+### Multi-area house navigator (exploration)
+
+**Goal:** Evolve the simple promise of “choose an area, see its key insights” into an optional, calm whole-house view—without turning Area Glance into a dashboard generator.
+
+- Start with an explicit, static multi-area mode: the user chooses a small set of areas and the card renders each as its familiar Area Glance row. In tower layout, those same areas can form a vertical series.
+- Explore an optional area picker at the top (tabs or compact chips) that filters the view to one selected area when space is limited, especially on mobile.
+- Preserve the existing area-aware rules for every row: automatic discovery, exclusions, selected-entity sets, actions, detail sheets, and unavailable handling must stay correct in that row’s area context.
+- Keep selection deliberate. Initial configuration should ask users which areas to include and in what order; do not silently add every area in the home. An explicit “all areas” option can be considered later.
+- Allow a shared starter profile across selected rooms first. Per-area overrides are useful, but should follow only if they can avoid a deeply nested, overwhelming editor.
+- Reuse the same discovery and aggregation engine, with one area/entity index per Home Assistant update, so a whole-house view does not multiply scans of `hass.states`.
+- Keep system-wide concepts honest: Energy, Security and Cameras should remain their own profiles initially rather than being mixed indistinguishably into room tabs.
+- Validate the interaction in Card Lab before implementation: four-to-six room desktop stacks, narrow mobile tabs, tower series, missing area data, and mixed room capabilities.
+
+**Not in scope for the first version:** automatic dashboard generation, floorplans, persisted global navigation state, or claiming that a selected set of rooms represents complete home coverage.
+
 ### 1. Insight arranging workflow
 
 **Status:** Implemented in the current development build.

@@ -29,15 +29,17 @@ type: module
 ## Supported insights
 
 - **Comfort & air:** temperature, humidity, CO₂, PM2.5, VOC, AQI, weather.
-- **Home activity:** lights, power, battery, motion, presence, people home, doors, windows, blinds, locks, leaks, security, Attention.
+- **Home activity:** lights, power, battery, motion, presence, people home, doors, windows, blinds, locks, leaks, alarms, and Attention.
 - **Devices & utilities:** media or other chosen devices, robot vacuums, cameras (including full-slot previews), clocks, calendar date, and Custom combinations.
 - **Profiles:** automatic area, Whole home, Energy Dashboard, Home battery, Security, and Cameras (up to three cropped previews, one per camera device).
 
-## What it can show
+## Smart defaults, room by room
 
 For areas, automatic suggestions include temperature, humidity, lights, live power, CO₂, PM2.5, VOC, AQI, motion, presence, doors, windows, blinds, locks, leaks, and Attention (unavailable entities or updates). Matching favours Home Assistant domains, device classes, and units—not loose entity-name matching.
 
-You can also start with **Whole home**, **Energy**, **Home battery**, or **Security**. With no area selected, **Energy** reads the live grid, solar, battery flow, and battery charge sources configured in Home Assistant's Energy Dashboard—never guessed from entity names. If Energy Dashboard is not configured, replace those slots with your own entity insights. Security is deliberately conservative: it reports the monitored alarm, doors, windows, and locks without claiming coverage the card cannot verify.
+You can also start with **Whole home**, **Energy**, **Home battery**, **Security**, or **Cameras**. The Cameras profile selects up to three cropped previews—one per device where possible—without affecting neighbouring insight widths.
+
+With no area selected, **Energy** reads the live grid, solar, battery flow, and battery charge sources configured in Home Assistant's Energy Dashboard—never guessed from entity names. If Energy Dashboard is not configured, replace those slots with your own entity insights. Security is deliberately conservative: it reports the monitored alarm, doors, windows, and locks without claiming coverage the card cannot verify.
 
 Dedicated entity-led insights are available for:
 
@@ -56,13 +58,13 @@ metrics:
     label_mode: entity
 ```
 
-## Trustworthy aggregates and useful detail
+## Details when you need them
 
 Area aggregates include compatible new devices automatically. Use **Exclude entities from this area** to remove noise such as an always-on LED, while future compatible devices continue to be included. Use **Selected entities** when you want a deliberate cross-area group instead.
 
 Tap an aggregate to inspect exactly which entities contribute. Light aggregates include individual and all-lights toggles; numeric temperature and power aggregates show useful summary statistics. The same aggregate membership controls are available for area-based header statuses.
 
-## Layout and appearance
+## Make it yours
 
 Choose **Title beside insights** (the compact band), **Title above insights**, **Insight tower**, or **Insights only**. Stacked headers can align left, centre, or right. Cards resize their visible insights automatically.
 
@@ -70,9 +72,9 @@ Appearance controls cover height, theme-aware colour style, background, shadow, 
 
 Every header and insight supports Home Assistant tap, hold, and double-tap actions. Fine tuning includes aggregation choice, threshold colours, label source, decimal precision, unit display/override, icon and label visibility, and power-direction inversion.
 
-![Living-area example](docs/screenshots/living.png)
+![Automatic Living-area summary](docs/screenshots/living.png)
 
-![Energy example](docs/screenshots/energy.png)
+![Energy Dashboard summary](docs/screenshots/energy.png)
 
 ## Troubleshooting
 
