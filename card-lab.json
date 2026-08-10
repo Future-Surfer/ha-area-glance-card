@@ -16,6 +16,13 @@
       "yaml": "type: custom:area-glance-card\ntitle: Energy\ntheme: dark\nstatus:\n  entity: sensor.net_energy_cost\n  active_text: Net cost £2.53 today\n  inactive_text: No cost data\nmetrics:\n  - preset: power\n    entity: sensor.home_power\n    label: Home\n    icon: mdi:home-lightning-bolt\n  - preset: power\n    entity: sensor.solar_power\n    label: Solar\n    icon: mdi:solar-power-variant\n  - preset: battery\n    entity: sensor.battery_soc\n  - preset: power\n    entity: sensor.grid_export\n    label: Export\n    icon: mdi:transmission-tower-export\n",
       "theme": "dark",
       "layout": { "mode": "sections", "columns": 4, "cardSpan": 4, "columnWidth": 180, "gap": 12 }
+    },
+    {
+      "id": "chart",
+      "name": "Temperature history",
+      "yaml": "type: custom:area-glance-card\nprofile: chart\nchart:\n  type: line\n  entity: sensor.living_room_temperature\n  range: 24h\n",
+      "theme": "light",
+      "layout": { "mode": "sections", "columns": 4, "cardSpan": 4, "columnWidth": 180, "gap": 12 }
     }
   ]
 }

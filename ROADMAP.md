@@ -44,6 +44,16 @@ Camera previews can be used individually or via the Cameras profile, which selec
 
 ## Roadmap
 
+### Visual style system (exploration)
+
+**Goal:** Let a small named visual style do more useful work than changing a colour palette, while preserving Home Assistant's theme and explicit user choices.
+
+- Future styles may define typography weight, icon policy, divider strength, radius, shadow, and emphasis behaviour—not merely background colour.
+- A restrained **Precision** direction should use mostly monochrome icons and fine linework, reserving colour for status, warnings, and meaningful data emphasis.
+- Explicit entity colours, threshold colours, and safety states must always override a visual style.
+- Keep styles as a small named set backed by CSS variables; do not introduce arbitrary CSS controls.
+- Implement this after the Chart profile, so the first chart establishes the shared visual primitives rather than two styling systems evolving independently.
+
 ### Rich insight visualisations
 
 **Goal:** Let an insight use its fixed slot for more than an icon and value when that makes the state meaningfully easier to understand.

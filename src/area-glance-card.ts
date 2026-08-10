@@ -1,8 +1,10 @@
-import { LitElement, css, html, nothing, type PropertyValues } from "lit";
+import { LitElement, css, html, nothing, svg, type PropertyValues } from "lit";
 import { dispatchHassAction, type ActionTrigger } from "./actions";
 import { areaEntityIds } from "./area-index";
+import { bucketPoints, fetchChartHistory, liveNumericState, rangeMilliseconds, type ChartHistory } from "./chart-data";
+import { chartGeometry } from "./chart-geometry";
 import { PRESETS, presetMetric } from "./presets";
-import type { ActionConfig, AreaGlanceConfig, AreaSignal, EntityState, HassLike, MetricConfig, MetricPreset, StatusConfig } from "./types";
+import type { ActionConfig, AreaGlanceConfig, AreaSignal, ChartConfig, ChartType, EntityState, HassLike, MetricConfig, MetricPreset, StatusConfig } from "./types";
 
 const UNAVAILABLE = new Set(["unknown", "unavailable", "none", ""]);
 const DEFAULT_METRICS = [presetMetric("temperature"), presetMetric("lights"), presetMetric("power"), presetMetric("device")];
@@ -330,14 +332,43 @@ interface DisplayValueParts {
 
 interface EnergySourcePreference {
   type?: string;
+  name?: string;
   stat_rate?: string;
   stat_soc?: string;
-  power_config?: { stat_rate_from?: string; stat_rate_to?: string };
+  stat_energy_from?: string;
+  stat_energy_to?: string;
+  power_config?: { stat_rate?: string; stat_rate_from?: string; stat_rate_to?: string };
 }
 
 interface EnergyPreferences {
   energy_sources?: EnergySourcePreference[];
 }
+
+type ChartEnergySource = NonNullable<ChartConfig["energy_source"]>;
+
+/**
+ * Prefer a deliberately configured Energy Dashboard source where that chart
+ * form describes it truthfully. Daily totals remain a direct entity choice:
+ * an import/export pair must not be silently treated as one consumption total.
+ */
+const suggestedEnergyChartSource = (preferences: EnergyPreferences | undefined, type: ChartType): ChartEnergySource | undefined => {
+  const sources = preferences?.energy_sources ?? [];
+  const source = (kind: string) => sources.find((entry) => entry.type === kind);
+  const grid = source("grid");
+  const solar = source("solar");
+  const battery = source("battery");
+  if ((type === "columns" || type === "line") && (grid?.power_config?.stat_rate_from || grid?.power_config?.stat_rate || grid?.stat_rate)) return "grid";
+  if (type === "area" && solar?.stat_rate) return "solar";
+  if (type === "area" && battery?.stat_soc) return "battery_soc";
+  return undefined;
+};
+
+const configuredEnergyEntities = (preferences: EnergyPreferences | undefined, type: ChartType): Set<string> => {
+  if (type === "daily_totals") {
+    return new Set((preferences?.energy_sources ?? []).flatMap((source) => [source.stat_energy_from, source.stat_energy_to]).filter((entity): entity is string => Boolean(entity)));
+  }
+  return new Set();
+};
 
 /** Keep measurement units visually secondary without changing the actual value or its accessible label. */
 const splitDisplayUnit = (value: string): DisplayValueParts => {
@@ -380,17 +411,28 @@ export class AreaGlanceCard extends LitElement {
   private _config?: AreaGlanceConfig;
   private _detail?: DetailSheet;
   private _energyPreferences?: EnergyPreferences;
-  private _energyPreferencesHass?: HassLike;
+  /** `hass` is replaced on every state update, so it cannot be used as a load key. */
+  private _energyPreferencesLoaded = false;
   private _energyPreferencesRequest?: Promise<void>;
+  private _chartHistory?: ChartHistory;
+  private _chartKey?: string;
+  private _chartRequest = 0;
+  /** Distinguish a genuinely empty recorder response from the first in-flight request. */
+  private _chartLoading = false;
+  private _chartRefreshTimer?: number;
+  private _chartRetryTimer?: number;
+  private _chartRetriedKey?: string;
   private _clockTimer?: number;
   private _resizeObserver?: ResizeObserver;
+  /** Actual plot width prevents SVG glyphs being distorted as Sections settles. */
+  private _chartPlotWidth = 560;
   private _towerIconMode: "normal" | "compact" | "hidden" = "normal";
   private _metricGesture?: { pointerId: number; metric: MetricConfig; display: MetricDisplay; startX: number; startY: number; held: boolean; timer?: number };
   private _pendingMetricTap?: { metric: MetricConfig; display: MetricDisplay; timer: number };
   private _ignoreMetricClick = false;
 
   static get properties() {
-    return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true }, _towerIconMode: { state: true } };
+    return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true }, _towerIconMode: { state: true }, _chartHistory: { state: true }, _chartLoading: { state: true }, _chartPlotWidth: { state: true } };
   }
 
   static getConfigElement() {
@@ -402,19 +444,21 @@ export class AreaGlanceCard extends LitElement {
   }
 
   public setConfig(config: AreaGlanceConfig): void {
-    if (!config || (!config.title && !config.area && config.profile !== "house" && config.profile !== "security" && config.profile !== "cameras" && config.layout !== "metrics-only")) {
-      throw new Error("Set a title, choose an area, use a Home, Security, or Cameras profile, or use Metrics only.");
+    if (!config || (!config.title && !config.area && !["house", "security", "cameras", "chart"].includes(config.profile ?? "") && config.layout !== "metrics-only")) {
+      throw new Error("Set a title, choose an area, use a Home, Security, Cameras, or Chart profile, or use Metrics only.");
     }
     this._config = {
       ...config,
       metrics: config.metrics?.length ? config.metrics : defaultMetricsForProfile(config.profile, this.hass),
     };
     this._loadEnergyPreferences();
+    this._ensureChartHistory();
   }
 
   private _heightOption() { return HEIGHT_OPTIONS[this._config?.height ?? "slim"]; }
   private _gridRows() {
     const height = this._heightOption();
+    if (this._config?.profile === "chart") return 3.2;
     if (this._config?.layout === "tower") return Math.max(3.5, 1.2 + (this._config?.metrics?.filter((metric) => !metric.hidden).length ?? 1) * 1.15);
     return this._config?.layout === "stacked" ? height.stackedRows : height.rows;
   }
@@ -447,13 +491,15 @@ export class AreaGlanceCard extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     this._clockTimer = window.setInterval(() => this.requestUpdate(), 30000);
-    this._resizeObserver = new ResizeObserver(() => this._syncTowerIconMode());
+    this._resizeObserver = new ResizeObserver(() => { this._syncTowerIconMode(); this._syncChartPlotWidth(); });
     this._resizeObserver.observe(this);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     if (this._clockTimer !== undefined) window.clearInterval(this._clockTimer);
+    if (this._chartRefreshTimer !== undefined) window.clearTimeout(this._chartRefreshTimer);
+    if (this._chartRetryTimer !== undefined) window.clearTimeout(this._chartRetryTimer);
     this._clockTimer = undefined;
     this._resizeObserver?.disconnect();
     this._resizeObserver = undefined;
@@ -465,15 +511,15 @@ export class AreaGlanceCard extends LitElement {
   protected willUpdate(changed: PropertyValues<this>) {
     if (changed.has("hass")) {
       this._loadEnergyPreferences();
+      this._ensureChartHistory();
       this.requestUpdate();
     }
   }
 
   private _loadEnergyPreferences() {
-    if (this._config?.profile !== "energy" || !this.hass?.callWS || this._energyPreferencesHass === this.hass || this._energyPreferencesRequest) return;
+    if (!["energy", "chart"].includes(this._config?.profile ?? "") || !this.hass?.callWS || this._energyPreferencesLoaded || this._energyPreferencesRequest) return;
     const hass = this.hass;
     const callWS = hass.callWS!;
-    this._energyPreferencesHass = hass;
     this._energyPreferencesRequest = callWS<EnergyPreferences>({ type: "energy/get_prefs" })
       .then((preferences) => {
         if (this.hass === hass) this._energyPreferences = preferences;
@@ -482,13 +528,204 @@ export class AreaGlanceCard extends LitElement {
         if (this.hass === hass) this._energyPreferences = undefined;
       })
       .finally(() => {
+        this._energyPreferencesLoaded = true;
         this._energyPreferencesRequest = undefined;
+        this._ensureChartHistory(true);
         this.requestUpdate();
       });
   }
 
   private _energySource(type: EnergySourcePreference["type"]): EnergySourcePreference | undefined {
     return this._energyPreferences?.energy_sources?.find((source) => source.type === type);
+  }
+
+  private _chartSource(chart = this._config?.chart): { entity?: string; importEntity?: string; exportEntity?: string } {
+    if (!chart) return {};
+    if (chart.entity) return { entity: chart.entity };
+    const source = chart.energy_source ?? suggestedEnergyChartSource(this._energyPreferences, chart.type ?? "line");
+    const grid = this._energySource("grid");
+    const solar = this._energySource("solar");
+    const battery = this._energySource("battery");
+    const gridRate = grid?.power_config?.stat_rate_from ?? grid?.power_config?.stat_rate ?? grid?.stat_rate;
+    if (source === "grid" && gridRate) return { importEntity: gridRate, exportEntity: grid?.power_config?.stat_rate_to };
+    if (source === "solar" && solar?.stat_rate) return { entity: solar.stat_rate };
+    if (source === "battery_soc" && battery?.stat_soc) return { entity: battery.stat_soc };
+    if (source === "battery_power" && battery?.stat_rate) return { entity: battery.stat_rate };
+    return { entity: this._suggestChartEntity(chart.type ?? "line") };
+  }
+
+  /** Deliberate metadata-only source ranking. Friendly-name order only breaks a tie. */
+  private _suggestChartEntity(type: ChartType): string | undefined {
+    const candidates = Object.entries(this.hass?.states ?? {})
+      .filter((entry): entry is [string, EntityState] => entry[0].startsWith("sensor.") && Boolean(entry[1]) && asNumber(entry[1]?.state ?? "") !== undefined);
+    const configuredTotals = configuredEnergyEntities(this._energyPreferences, type);
+    const score = ([entityId, state]: [string, EntityState]): number => {
+      const deviceClass = String(state.attributes.device_class ?? "");
+      const stateClass = String(state.attributes.state_class ?? "");
+      const unit = String(state.attributes.unit_of_measurement ?? "");
+      if (type === "daily_totals") return ["energy", "water", "gas", "monetary"].includes(deviceClass) && ["total", "total_increasing"].includes(stateClass) ? (configuredTotals.has(entityId) ? 140 : 100) : -1;
+      if (type === "columns") return deviceClass === "power" ? 100 : Boolean(powerUnit(unit)) ? 80 : -1;
+      if (type === "area") return deviceClass === "power" ? 80 : deviceClass === "battery" || unit === "%" ? 70 : -1;
+      return stateClass === "measurement" ? (["temperature", "humidity", "carbon_dioxide", "pm25", "aqi"].includes(deviceClass) ? 100 : 50) : -1;
+    };
+    return candidates.map((entry) => ({ entry, score: score(entry) })).filter((item) => item.score >= 0)
+      .sort((left, right) => right.score - left.score || this._entityName(left.entry[0]).localeCompare(this._entityName(right.entry[0])) || left.entry[0].localeCompare(right.entry[0]))[0]?.entry[0];
+  }
+
+  private _chartCacheKey(): string {
+    const chart = this._config?.chart ?? {};
+    return JSON.stringify({ chart, source: this._chartSource(chart) });
+  }
+
+  private _ensureChartHistory(force = false) {
+    if (this._config?.profile !== "chart" || !this.hass) return;
+    const key = this._chartCacheKey();
+    const keyChanged = this._chartKey !== key;
+    if (!force && this._chartKey === key && this._chartHistory) return;
+    if (keyChanged && this._chartRetryTimer !== undefined) {
+      window.clearTimeout(this._chartRetryTimer);
+      this._chartRetryTimer = undefined;
+      this._chartRetriedKey = undefined;
+    }
+    this._chartKey = key;
+    const request = ++this._chartRequest;
+    const chart = this._config.chart ?? {};
+    const source = this._chartSource(chart);
+    this._chartLoading = true;
+    // Keep an established plot visible while its periodic refresh is in flight,
+    // but never let a previous source masquerade as the newly chosen one.
+    if (keyChanged) this._chartHistory = undefined;
+    fetchChartHistory(this.hass, chart, source).then((history) => {
+      if (request !== this._chartRequest || this._chartKey !== key) return;
+      this._chartHistory = history;
+      // Recorder can briefly answer an empty history query while Home Assistant
+      // is still bringing the dashboard connection up. Retry that one initial
+      // response automatically; a settled empty result remains honest.
+      const mayRetry = !history.points.length && Boolean(source.entity ?? source.importEntity) && this._chartRetriedKey !== key;
+      this._chartLoading = mayRetry;
+      if (mayRetry) {
+        this._chartRetriedKey = key;
+        this._chartRetryTimer = window.setTimeout(() => {
+          this._chartRetryTimer = undefined;
+          this._ensureChartHistory(true);
+        }, 1500);
+      }
+      this.requestUpdate();
+      if (this._chartRefreshTimer !== undefined) window.clearTimeout(this._chartRefreshTimer);
+      const refresh = rangeMilliseconds(chart.range, chart.type ?? "line") <= 48 * 3_600_000 ? 5 * 60_000 : 15 * 60_000;
+      this._chartRefreshTimer = window.setTimeout(() => this._ensureChartHistory(true), refresh);
+    });
+  }
+
+  private _chartLivePoints(): ChartHistory {
+    const chart = this._config?.chart ?? {};
+    const history = this._chartHistory ?? { points: [] };
+    // A current live value may extend real history, but is not itself a chart.
+    // This preserves the explicit, calm unavailable-history state.
+    if (!history.points.length) return history;
+    // Daily totals have already been converted from a cumulative recorder
+    // series into per-day deltas. Appending the raw live total here would turn
+    // today into one enormous, incorrect final bar.
+    if (chart.type === "daily_totals") return history;
+    const source = this._chartSource(chart);
+    const live = source.entity ? liveNumericState(this.hass?.states[source.entity]) : source.importEntity ? (liveNumericState(this.hass?.states[source.importEntity]) ?? 0) - (liveNumericState(this.hass?.states[source.exportEntity ?? ""]) ?? 0) : undefined;
+    if (live === undefined) return history;
+    const now = Date.now();
+    const points = [...history.points.filter((point) => now - point.time < rangeMilliseconds(chart.range, chart.type ?? "line")), { time: now, value: live }];
+    return { ...history, points };
+  }
+
+  private _chartTitle() {
+    const chart = this._config?.chart ?? {};
+    if (chart.title) return chart.title;
+    const source = this._chartSource(chart);
+    const energySource = chart.energy_source ?? suggestedEnergyChartSource(this._energyPreferences, chart.type ?? "line");
+    if (energySource === "grid") return "Grid";
+    if (energySource === "solar") return "Solar";
+    if (energySource === "battery_soc") return "Battery";
+    if (energySource === "battery_power") return "Battery flow";
+    // Entity names are the most useful default for a single-source chart.
+    // The dedicated Chart title field remains an intentional override.
+    return source.entity ? this._entityName(source.entity) : this._config?.title ?? "Chart";
+  }
+
+  private _chartSummary(history: ChartHistory): string {
+    const chart = this._config?.chart ?? {};
+    if (chart.summary) return chart.summary;
+    const points = history.points;
+    if (!points.length) return this._chartLoading ? "Loading history…" : "History unavailable";
+    const value = chart.type === "daily_totals" ? points.reduce((sum, point) => sum + point.value, 0) : points.at(-1)!.value;
+    const unit = chart.unit ?? history.unit ?? "";
+    const decimals = chart.decimals ?? (unit === "W" || unit === "%" ? 0 : 1);
+    return `${value.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit ? ` ${unit}` : ""}`;
+  }
+
+  private _chartClicked(event: Event) {
+    event.stopPropagation();
+    const source = this._chartSource();
+    this._runAction(this._config, source.entity ?? source.importEntity);
+  }
+
+  /** Keep chart axes deliberately small and stable: a complete frame, not a tooltip. */
+  private _chartTimeTicks(type: ChartType, range: ChartConfig["range"], start: number, end: number, plotWidth: number) {
+    const count = plotWidth < 280 ? 4 : plotWidth < 420 ? 5 : 7;
+    const duration = end - start;
+    return Array.from({ length: count }, (_, index) => {
+      const progress = index / Math.max(1, count - 1);
+      const time = start + duration * progress;
+      let label: string;
+      if (type === "daily_totals") {
+        label = new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(new Date(time));
+      } else {
+        const hours = Math.round((duration / 3_600_000) * progress);
+        label = index === count - 1 ? `${hours}h` : String(hours).padStart(2, "0");
+      }
+      return { x: plotWidth * progress, label, anchor: index === 0 ? "start" : index === count - 1 ? "end" : "middle" };
+    });
+  }
+
+  private _renderChart() {
+    const chart = this._config?.chart ?? {};
+    const type = chart.type ?? "line";
+    const history = this._chartLivePoints();
+    let points = history.points;
+    const end = Date.now();
+    const start = end - rangeMilliseconds(chart.range, type);
+    if (type === "columns") {
+      points = bucketPoints(points, start, end, 3_600_000, chart.bucket_statistic ?? "mean");
+    }
+    // Match the SVG viewBox to the measured wrapper width. This deliberately
+    // avoids preserveAspectRatio="none", which squeezes text while Sections
+    // finishes distributing its columns.
+    const svgWidth = this._chartPlotWidth;
+    const svgHeight = 138;
+    const margin = { left: 38, right: 10, top: 13, bottom: 28 };
+    const plotWidth = Math.max(120, svgWidth - margin.left - margin.right);
+    const plotHeight = svgHeight - margin.top - margin.bottom;
+    const geometry = chartGeometry(points, type, plotWidth, plotHeight, { start, end });
+    const unit = chart.unit ?? history.unit ?? "";
+    if (!geometry) return html`<div class="chart-empty">${this._chartLoading ? "Loading history…" : "History unavailable"}</div>`;
+    // Axis labels are intentionally terse. With the unit already in the
+    // top-right, a 5,000 W scale can simply read “5k”, not “5000 W”.
+    const formatAxis = (value: number) => Math.abs(value) >= 1000
+      ? `${Math.round(value / 1000)}k`
+      : Math.round(value).toLocaleString(undefined, { maximumFractionDigits: 0, useGrouping: false });
+    const timeTicks = this._chartTimeTicks(type, chart.range, start, end, plotWidth);
+    const scaleTicks = [
+      { value: geometry.max, y: 5 },
+      { value: (geometry.max + geometry.min) / 2, y: plotHeight / 2 + 4 },
+      { value: geometry.min, y: plotHeight - 2 },
+    ];
+    return svg`<svg class="chart-svg" width=${svgWidth} height=${svgHeight} viewBox=${`0 0 ${svgWidth} ${svgHeight}`} role="img" aria-label=${`${this._chartTitle()} history`} preserveAspectRatio="xMinYMid meet">
+      <g transform=${`translate(${margin.left} ${margin.top})`}>
+      <line class="chart-axis chart-y-axis" x1="0" y1="0" x2="0" y2=${plotHeight}></line><line class="chart-axis" x1="0" y1=${plotHeight} x2=${plotWidth} y2=${plotHeight}></line>
+      ${(type === "area" || type === "columns" || type === "daily_totals" || geometry.min < 0) ? svg`<line class="chart-zero" x1="0" y1=${geometry.baseline} x2=${plotWidth} y2=${geometry.baseline}></line>` : nothing}
+      ${type === "area" ? svg`<path class="chart-area" d=${geometry.areaPath}></path><path class="chart-line" d=${geometry.path}></path>` : type === "columns" || type === "daily_totals" ? geometry.bars.map((bar, index) => svg`<rect class=${`chart-bar${bar.negative ? " negative" : ""}${type === "daily_totals" && index === geometry.bars.length - 1 ? " current" : ""}`} x=${bar.x} y=${bar.y} width=${bar.width} height=${bar.height}></rect>`) : svg`<path class="chart-line" d=${geometry.path}></path>`}
+      ${timeTicks.map((tick) => svg`<text class="chart-tick" x=${tick.x} y=${plotHeight + 22} text-anchor=${tick.anchor}>${tick.label}</text>`)}
+      ${scaleTicks.map((tick) => svg`<text class="chart-scale" x="-7" y=${tick.y} text-anchor="end">${formatAxis(tick.value)}</text>`)}
+      ${unit ? svg`<text class="chart-unit" x=${plotWidth} y="5" text-anchor="end">${unit}</text>` : nothing}
+      </g>
+    </svg>`;
   }
 
   private _energyMetric(metric: MetricConfig): MetricDisplay | undefined {
@@ -1409,8 +1646,17 @@ export class AreaGlanceCard extends LitElement {
     if (next !== this._towerIconMode) this._towerIconMode = next;
   }
 
+  /** Keep the SVG coordinate system aligned to its final rendered width. */
+  private _syncChartPlotWidth() {
+    if (this._config?.profile !== "chart") return;
+    const width = this.renderRoot.querySelector<HTMLElement>(".chart-plot")?.getBoundingClientRect().width;
+    const next = width && Number.isFinite(width) ? Math.max(180, Math.round(width)) : undefined;
+    if (next && Math.abs(next - this._chartPlotWidth) > 1) this._chartPlotWidth = next;
+  }
+
   protected updated(changed: PropertyValues<this>) {
     this._syncTowerIconMode();
+    this._syncChartPlotWidth();
     if (!changed.has("_detail" as never)) return;
     const dialog = this.renderRoot.querySelector<HTMLDialogElement>(".detail-sheet");
     if (this._detail && dialog && !dialog.open) dialog.showModal();
@@ -1419,6 +1665,20 @@ export class AreaGlanceCard extends LitElement {
 
   protected render() {
     if (!this._config) return nothing;
+    if (this._config.profile === "chart") {
+      const appearance = this._config.appearance;
+      const background = appearance?.background ?? this._config.background;
+      const noShadow = appearance?.shadow === false;
+      const textWeight = appearance?.text_weight ?? (appearance?.style === "light" ? "light" : "bold");
+      const history = this._chartLivePoints();
+      const explicitStatus = this._config.status ? this._status() : undefined;
+      const chartTitle = this._chartTitle();
+      const titleLines = this._headerLineMode("title");
+      const titleFit = this._headerTitleFit(chartTitle, titleLines);
+      return html`<ha-card class=${`chart-card ${this._config.theme === "dark" ? "force-dark" : this._config.theme === "light" ? "force-light" : ""}${textWeight !== "bold" ? ` ${textWeight}-weight` : ""}${noShadow ? " no-shadow" : ""}`} style=${`--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);${background ? `--area-glance-card-background:${background}` : ""}${this._layoutStyle(0)}`}>
+        <section class="chart-layout"><div class="chart-summary summary" style=${`--area-glance-title-fit:${titleFit}`}><span class=${`title ${titleLines}`}>${chartTitle}</span><span class="chart-value">${explicitStatus?.line ?? this._chartSummary(history)}</span><span class="chart-range">${explicitStatus?.age ?? this._config.chart?.range ?? (this._config.chart?.type === "daily_totals" ? "7d" : "24h")}</span></div><button class="chart-plot" aria-label=${`Open ${chartTitle} details`} @click=${this._chartClicked}>${this._renderChart()}</button></section>
+      </ha-card>`;
+    }
     const status = this._status();
     const metrics = (this._config.metrics ?? []).map((metric) => ({ metric, display: this._metric(metric) })).filter((entry): entry is { metric: MetricConfig; display: MetricDisplay } => Boolean(entry.display));
     const title = this._config.title
@@ -1486,6 +1746,24 @@ export class AreaGlanceCard extends LitElement {
   static styles = css`
     :host { display:block; --area-glance-accent:var(--primary-color); }
     ha-card { overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 8%, transparent); border-radius:var(--area-glance-card-border-radius, 24px); cursor:default; background:var(--area-glance-card-background, var(--card-background-color, #fff)); box-shadow:var(--ha-card-box-shadow, 0 8px 24px rgb(0 0 0 / 18%)); }
+    .chart-layout { min-height:calc(var(--area-glance-content-height, 68px) * 2); display:grid; grid-template-columns:clamp(108px, 23%, 152px) minmax(0, 1fr); gap:0; align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
+    .chart-summary { display:flex; min-width:0; flex-direction:column; justify-content:center; gap:5px; }
+    .chart-value { overflow:hidden; color:var(--primary-text-color); font-size:clamp(1rem, 2.5vw, 1.35rem); font-weight:750; letter-spacing:-.02em; text-overflow:ellipsis; white-space:nowrap; }
+    .chart-range { color:var(--secondary-text-color); font-size:.76rem; font-weight:600; text-transform:uppercase; }
+    .chart-plot { display:grid; min-width:0; padding:0; border:0; color:var(--primary-text-color); background:transparent; cursor:pointer; }
+    .chart-plot:hover { background:color-mix(in srgb, var(--area-glance-accent) 5%, transparent); border-radius:8px; }
+    .chart-svg { display:block; width:100%; height:138px; min-height:0; overflow:visible; }
+    .chart-axis, .chart-zero { stroke:color-mix(in srgb, var(--primary-text-color) 30%, transparent); stroke-width:1; vector-effect:non-scaling-stroke; }
+    .chart-zero { stroke:color-mix(in srgb, var(--primary-text-color) 46%, transparent); }
+    .chart-line { fill:none; stroke:var(--primary-text-color); stroke-width:1.7; vector-effect:non-scaling-stroke; }
+    .chart-area { fill:color-mix(in srgb, var(--area-glance-accent) 19%, transparent); }
+    .chart-bar { fill:color-mix(in srgb, var(--primary-text-color) 62%, transparent); }
+    .chart-bar.negative { fill:var(--error-color, #db4437); }
+    .chart-bar.current { fill:var(--area-glance-accent); }
+    .chart-tick, .chart-scale, .chart-unit { fill:var(--secondary-text-color); font:13px/1 var(--primary-font-family, inherit); font-variant-numeric:tabular-nums; }
+    .chart-scale { font-size:13px; }
+    .chart-unit { fill:var(--primary-text-color); font-weight:650; }
+    .chart-empty { display:grid; place-items:center; min-height:116px; color:var(--secondary-text-color); font-size:.9rem; }
     ha-card.clickable { cursor:pointer; }
     ha-card.no-shadow { box-shadow:none; }
     .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:clamp(108px, 23%, 152px) minmax(0, 1fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
@@ -1639,12 +1917,17 @@ export class AreaGlanceCard extends LitElement {
     .light-control-panel .detail-toggle-thumb { width:26px; height:26px; }
     @media (max-width: 500px) { .detail-sheet { width:calc(100vw - 20px); max-height:84dvh; border-radius:20px; } .detail-sheet.aggregate-sheet.scrollable-sheet { height:84dvh; } .aggregate-panel { padding:22px 18px; } .detail-aggregate-entity { padding:10px 12px; gap:11px; } .light-control-panel { padding:22px 18px; } .light-control-panel .detail-entity { padding:11px 13px; gap:11px; } .light-control-panel .detail-icon-badge { width:44px; height:44px; } .light-control-panel .detail-icon-badge ha-icon { width:24px; height:24px; } }
     @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:clamp(88px, 25%, 108px) minmax(0, 1fr); padding:7px 8px; } .layout.area-icon-layout { grid-template-columns:clamp(130px, 31%, 160px) minmax(0, 1fr); padding-inline:9px; } .summary.with-area-icon { grid-template-columns:37px minmax(0, 1fr); gap:7px; } .area-icon { width:37px; height:37px; } .area-icon ha-icon { width:22px; height:22px; } .title { font-size:min(calc(var(--area-glance-title-size, 1.8rem) * var(--area-glance-title-scale, 1)), calc(1.48rem * var(--area-glance-title-scale, 1))); } .status { font-size:calc(var(--area-glance-status-size, .85rem) * var(--area-glance-status-scale, 1)); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .label { margin-top:1px; } }
+    @media (max-width: 420px) { .chart-layout { grid-template-columns:clamp(88px, 25%, 108px) minmax(0, 1fr); padding:var(--area-glance-pad-y, 7px) var(--area-glance-pad-x, 8px); gap:0; } .chart-value { font-size:1rem; } .chart-svg { min-height:100px; } }
   `;
 }
 
 export class AreaGlanceCardEditor extends LitElement {
   public hass?: HassLike;
   private _config: AreaGlanceConfig = { title: "Area", metrics: DEFAULT_METRICS };
+  /** The editor reads the same trusted Energy Dashboard preferences as the card. */
+  private _chartEnergyPreferences?: EnergyPreferences;
+  private _chartEnergyPreferencesLoaded = false;
+  private _chartEnergyPreferencesRequest?: Promise<void>;
   private _suggestionsNeedUpdate = false;
   private _draggedMetricIndex?: number;
   private _dragOverMetricIndex?: number;
@@ -1655,9 +1938,28 @@ export class AreaGlanceCardEditor extends LitElement {
   private _dragDropCommitted = false;
   private _dragEndTimer?: number;
 
-  static get properties() { return { hass: { attribute: false }, _config: { state: true }, _suggestionsNeedUpdate: { state: true } }; }
+  static get properties() { return { hass: { attribute: false }, _config: { state: true }, _suggestionsNeedUpdate: { state: true }, _chartEnergyPreferences: { state: true } }; }
   public setConfig(config: AreaGlanceConfig) {
     this._config = { ...config, metrics: config.metrics?.length ? config.metrics : defaultMetricsForProfile(config.profile, this.hass) };
+    this._loadChartEnergyPreferences();
+  }
+
+  protected willUpdate(changed: PropertyValues<this>) {
+    if (changed.has("hass")) this._loadChartEnergyPreferences();
+  }
+
+  private _loadChartEnergyPreferences() {
+    if (!this.hass?.callWS || this._chartEnergyPreferencesLoaded || this._chartEnergyPreferencesRequest) return;
+    const hass = this.hass;
+    const callWS = hass.callWS!;
+    this._chartEnergyPreferencesRequest = callWS<EnergyPreferences>({ type: "energy/get_prefs" })
+      .then((preferences) => { if (this.hass === hass) this._chartEnergyPreferences = preferences; })
+      .catch(() => { if (this.hass === hass) this._chartEnergyPreferences = undefined; })
+      .finally(() => {
+        this._chartEnergyPreferencesLoaded = true;
+        this._chartEnergyPreferencesRequest = undefined;
+        this.requestUpdate();
+      });
   }
 
   private _change(change: Partial<AreaGlanceConfig>) {
@@ -1733,9 +2035,18 @@ export class AreaGlanceCardEditor extends LitElement {
     if (profile === "energy") return "energy";
     if (profile === "battery") return "battery";
     if (profile === "cameras") return "cameras";
+    if (profile === "chart") return "chart";
     return "area";
   }
-  private _purposeSelected(purpose: "area" | "house" | "energy" | "battery" | "security" | "cameras") {
+  private _purposeSelected(purpose: "area" | "house" | "energy" | "battery" | "security" | "cameras" | "chart") {
+    if (purpose === "chart") {
+      // Charts open on the most broadly useful whole-home view: a Line chart
+      // of live Grid flow from the Energy Dashboard. The resolver safely falls
+      // back to a compatible power sensor when an instance has no Grid source.
+      const chart: ChartConfig = this._config.chart ?? { type: "line", energy_source: "grid", range: "24h" };
+      this._change({ profile: "chart", chart, metrics: this._config.metrics ?? [] });
+      return;
+    }
     if (purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "cameras") {
       this._populateAreaPreset("", purpose);
       return;
@@ -1743,6 +2054,44 @@ export class AreaGlanceCardEditor extends LitElement {
     const profile = purpose === "area" ? "auto" : purpose;
     this._change({ profile });
     if (this._config.area) this._suggestionsNeedUpdate = true;
+  }
+  private _chartCandidate(type: ChartType): string | undefined {
+    const configuredTotals = configuredEnergyEntities(this._chartEnergyPreferences, type);
+    return Object.entries(this.hass?.states ?? {})
+      .filter((entry): entry is [string, EntityState] => entry[0].startsWith("sensor.") && Boolean(entry[1]) && asNumber(entry[1]?.state ?? "") !== undefined)
+      .map(([id, state]) => {
+        const deviceClass = String(state.attributes.device_class ?? "");
+        const stateClass = String(state.attributes.state_class ?? "");
+        const unit = String(state.attributes.unit_of_measurement ?? "");
+        const score = type === "daily_totals" ? (["energy", "water", "gas", "monetary"].includes(deviceClass) && ["total", "total_increasing"].includes(stateClass) ? (configuredTotals.has(id) ? 140 : 100) : -1)
+          : type === "columns" ? (deviceClass === "power" || Boolean(powerUnit(unit)) ? 90 : -1)
+            : type === "area" ? (deviceClass === "power" || deviceClass === "battery" || unit === "%" ? 80 : -1)
+              : stateClass === "measurement" ? (["temperature", "humidity", "carbon_dioxide", "pm25", "aqi"].includes(deviceClass) ? 100 : 50) : -1;
+        return { id, score, name: this._entityName(id) };
+      }).filter((entry) => entry.score >= 0).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name) || a.id.localeCompare(b.id))[0]?.id;
+  }
+  private _chartSuggestion(type: ChartType): Pick<ChartConfig, "entity" | "energy_source"> {
+    const energy_source = suggestedEnergyChartSource(this._chartEnergyPreferences, type);
+    return energy_source ? { energy_source, entity: undefined } : { entity: this._chartCandidate(type), energy_source: undefined };
+  }
+  private _chartChanged(change: Partial<ChartConfig>) {
+    const previous = this._config.chart ?? {};
+    this._change({ chart: { ...previous, ...change } });
+  }
+  private _renderChartEditor() {
+    const chart = this._config.chart ?? { type: "line" as const };
+    const type = chart.type ?? "line";
+    const suggested = this._chartCandidate(type);
+    const energySuggestion = suggestedEnergyChartSource(this._chartEnergyPreferences, type);
+    const sourceHint = chart.energy_source ? `Energy Dashboard: ${chart.energy_source.replaceAll("_", " ")}` : chart.entity ? this._entityName(chart.entity) : energySuggestion ? `Energy Dashboard: ${energySuggestion.replaceAll("_", " ")}` : suggested ? this._entityName(suggested) : "No compatible source found";
+    const typeHint: Record<ChartType, string> = { line: "Continuous sensor history", area: "Non-negative level or rate", columns: "Hourly signed or interval readings", daily_totals: "Daily total-increasing sensor deltas" };
+    return html`<section class="insights chart-editor"><h3>Chart</h3><p class="hint">Choose a chart type, then confirm its suggested source. Chart keeps one honest series and a calm header summary.</p>
+      <label>Chart type<select .value=${type} @change=${(event: Event) => { const next = (event.target as HTMLSelectElement).value as ChartType; this._chartChanged({ type: next, ...this._chartSuggestion(next), range: next === "daily_totals" ? "7d" : "24h" }); }}><option value="line">Line</option><option value="area">Area</option><option value="columns">Columns</option><option value="daily_totals">Daily totals</option></select></label><p class="slot-hint">${typeHint[type]}</p>
+      <label>Suggested source</label><p class="contributor-hint">${sourceHint}${!chart.energy_source && suggested ? " — matched from compatible Home Assistant sensors" : ""}</p>
+      ${suggested && !chart.energy_source && chart.entity !== suggested ? html`<button class="add-rule" @click=${() => this._chartChanged({ entity: suggested, energy_source: undefined })}>Use suggested source</button>` : nothing}
+      <ha-entity-picker .hass=${this.hass} .value=${chart.entity ?? ""} .label="Chart entity" allow-custom-entity @value-changed=${(event: Event) => this._chartChanged({ entity: this._pickerValue(event), energy_source: undefined })}></ha-entity-picker>
+      ${type !== "daily_totals" ? html`<label>Or use Energy Dashboard<select .value=${chart.energy_source ?? ""} @change=${(event: Event) => this._chartChanged({ energy_source: ((event.target as HTMLSelectElement).value || undefined) as ChartConfig["energy_source"], entity: undefined })}><option value="">Direct entity (recommended)</option>${type === "columns" || type === "line" ? html`<option value="grid">Grid import / export</option>` : nothing}<option value="solar">Solar generation</option><option value="battery_soc">Battery charge</option><option value="battery_power">Battery flow</option></select></label>` : nothing}
+      <details class="more-options"><summary>Fine tuning (optional)</summary><label>Range<select .value=${chart.range ?? (type === "daily_totals" ? "7d" : "24h")} @change=${(event: Event) => this._chartChanged({ range: (event.target as HTMLSelectElement).value as ChartConfig["range"] })}>${(type === "daily_totals" ? [["7d", "7 days"], ["14d", "14 days"], ["30d", "30 days"]] : [["6h", "6 hours"], ["24h", "24 hours"], ["48h", "48 hours"], ["7d", "7 days"]]).map(([value, label]) => html`<option value=${value}>${label}</option>`)}</select></label><div class="two"><label>Decimals<input type="number" min="0" max="4" .value=${chart.decimals?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._chartChanged({ decimals: value === "" ? undefined : Number(value) }); }}></label><label>Unit override<input .value=${chart.unit ?? ""} placeholder="Home Assistant unit" @input=${(event: Event) => this._chartChanged({ unit: (event.target as HTMLInputElement).value || undefined })}></label></div><label>Chart title<input .value=${chart.title ?? ""} placeholder="Use entity name" @input=${(event: Event) => this._chartChanged({ title: (event.target as HTMLInputElement).value || undefined })}></label><label>Header summary<input .value=${chart.summary ?? ""} placeholder="Automatic current value" @input=${(event: Event) => this._chartChanged({ summary: (event.target as HTMLInputElement).value || undefined })}></label><label>Data source<select .value=${chart.history_source ?? "auto"} @change=${(event: Event) => this._chartChanged({ history_source: (event.target as HTMLSelectElement).value as ChartConfig["history_source"] })}><option value="auto">Automatic</option><option value="raw">Recorder history</option><option value="statistics">Long-term statistics</option></select></label>${type === "columns" ? html`<label>Columns show<select .value=${chart.bucket_statistic ?? "mean"} @change=${(event: Event) => this._chartChanged({ bucket_statistic: (event.target as HTMLSelectElement).value as ChartConfig["bucket_statistic"] })}><option value="mean">Hourly mean</option><option value="last">Last value</option><option value="max">Highest value</option><option value="min">Lowest value</option></select></label>` : nothing}</details></section>`;
   }
   private _appearancePresetChanged(event: Event) {
     const preset = (event.target as HTMLSelectElement).value as NonNullable<NonNullable<AreaGlanceConfig["appearance"]>["preset"]>;
@@ -2252,15 +2601,15 @@ export class AreaGlanceCardEditor extends LitElement {
       <section class="setup">
         <span class="section-label">What does this card show?</span>
         <div class="purpose-grid">
-          ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"], ["security", "Security", "Home security"], ["cameras", "Cameras", "Live camera feeds"] ] as const).map(([value, title, description]) => html`<button class="purpose ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
+          ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"], ["security", "Security", "Home security"], ["cameras", "Cameras", "Live camera feeds"], ["chart", "Chart", "Compact history"] ] as const).map(([value, title, description]) => html`<button class="purpose ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
         </div>
-        ${purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "cameras" ? html`<p class="applied">${purpose === "energy" ? "System-wide live insights come from the Energy Dashboard setup. If it is not configured, add your own entity insights below." : purpose === "security" ? "Whole-home security suggestions are applied." : purpose === "cameras" ? "Up to three feeds are selected: one lower-resolution camera per device where Home Assistant exposes that information." : "Whole-home suggestions are applied."} You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._config.area ?? ""} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
+        ${purpose === "chart" ? html`<p class="applied">A dedicated chart uses one selected source. Its live summary updates immediately; recorded history refreshes calmly in the background.</p>` : purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "cameras" ? html`<p class="applied">${purpose === "energy" ? "System-wide live insights come from the Energy Dashboard setup. If it is not configured, add your own entity insights below." : purpose === "security" ? "Whole-home security suggestions are applied." : purpose === "cameras" ? "Up to three feeds are selected: one lower-resolution camera per device where Home Assistant exposes that information." : "Whole-home suggestions are applied."} You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._config.area ?? ""} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
       </section>
-      <section class="card-layout">
+      ${purpose !== "chart" ? html`<section class="card-layout">
         <span class="section-label">What layout does this card have?</span>
         <label>Card layout<select .value=${this._config.layout ?? "header"} @change=${this._layoutChanged}><option value="header">Title beside insights (default)</option><option value="stacked">Title above insights</option><option value="tower">Insight tower (one column)</option><option value="metrics-only">Insights only</option></select></label>
-      </section>
-      <section class="insights"><h3>Insights</h3><p class="hint">Keep up to five. They resize automatically to fit the card.</p>
+      </section>` : nothing}
+      ${purpose === "chart" ? this._renderChartEditor() : html`<section class="insights"><h3>Insights</h3><p class="hint">Keep up to five. They resize automatically to fit the card.</p>
       ${metrics.map((metric, index) => {
         const preset = metric.preset ?? "custom";
         const supportsAggregate = AREA_MEASUREMENT_PRESETS.has(preset) || preset === "lights" || AREA_SIGNAL_PRESETS.has(preset);
@@ -2343,7 +2692,7 @@ export class AreaGlanceCardEditor extends LitElement {
         <div class="insight-actions"><div class="reorder"><button ?disabled=${index === 0} aria-label="Move insight left" @click=${() => this._moveMetric(index, -1)}>←</button><button ?disabled=${index === metrics.length - 1} aria-label="Move insight right" @click=${() => this._moveMetric(index, 1)}>→</button><button ?disabled=${metrics.length >= 5} @click=${() => this._duplicateMetric(index)}>Duplicate</button></div><label class="checkbox"><input type="checkbox" .checked=${metric.hidden ?? false} @change=${this._metricBoolean(index, "hidden")}> Hide</label><button class="remove" @click=${() => this._removeMetric(index)}>Remove</button></div></div>
       </details>`})}
       <button class="add" ?disabled=${metrics.length >= 5} @click=${this._addMetric}>Add insight</button>
-      </section>
+      </section>`}
       <details class="settings">
         <summary>Header</summary>
         ${this._config.layout !== "metrics-only" ? html`

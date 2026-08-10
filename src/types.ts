@@ -45,8 +45,31 @@ export interface HassLike {
   formatEntityName?: (state: EntityState, name?: unknown, options?: { separator?: string }) => string;
   formatEntityState?: (state: EntityState) => string;
   callService?: (domain: string, service: string, data?: Record<string, unknown>) => Promise<unknown>;
+  /** Narrow read-only REST contract used by the optional Chart profile. */
+  callApi?: <T = unknown>(method: string, path: string) => Promise<T>;
   /** Home Assistant WebSocket helper, used for read-only frontend preferences such as Energy Dashboard setup. */
   callWS?: <T = unknown>(message: Record<string, unknown>) => Promise<T>;
+}
+
+export type ChartType = "line" | "area" | "columns" | "daily_totals";
+
+/** A deliberately small, single-series chart configuration. */
+export interface ChartConfig {
+  type?: ChartType;
+  /** A directly chosen numeric sensor. */
+  entity?: string;
+  /** A source explicitly configured in Home Assistant's Energy Dashboard. */
+  energy_source?: "grid" | "solar" | "battery_soc" | "battery_power";
+  /** Short ranges use Recorder history; longer ranges favour statistics. */
+  range?: "6h" | "24h" | "48h" | "7d" | "14d" | "30d";
+  history_source?: "auto" | "raw" | "statistics";
+  /** Statistic used when bucketing a Columns chart. */
+  bucket_statistic?: "mean" | "last" | "max" | "min";
+  decimals?: number;
+  unit?: string;
+  title?: string;
+  /** Overrides the automatic live/period header summary. */
+  summary?: string;
 }
 
 export interface ActionConfig {
@@ -147,6 +170,8 @@ export interface AreaGlanceConfig extends ActionConfig {
   area?: string;
   status?: StatusConfig;
   metrics?: MetricConfig[];
+  /** Chart is a dedicated header-plus-plot profile, rather than an insight slot. */
+  chart?: ChartConfig;
   header_action?: ActionConfig;
   layout?: "header" | "stacked" | "metrics-only" | "tower";
   /** Text alignment is used by the title-above-insights layout. */
@@ -156,7 +181,7 @@ export interface AreaGlanceConfig extends ActionConfig {
   /** Controls whether the status and its time are kept together or shown on separate lines. */
   header_status_lines?: "auto" | "single" | "multi";
   height?: "slim" | "compact" | "standard" | "comfortable";
-  profile?: "auto" | "room" | "media" | "battery" | "energy" | "house" | "security" | "cameras";
+  profile?: "auto" | "room" | "media" | "battery" | "energy" | "house" | "security" | "cameras" | "chart";
   appearance?: {
     preset?: "theme" | "light" | "slate" | "charcoal" | "custom";
     /** Shared typography weight for the title and insight text. */
