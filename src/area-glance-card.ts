@@ -1,10 +1,11 @@
 import { LitElement, css, html, nothing, svg, type PropertyValues } from "lit";
 import { dispatchHassAction, type ActionTrigger } from "./actions";
 import { areaEntityIds } from "./area-index";
+import { resolveAreaReference, resolvedAreaId } from "./area-reference";
 import { bucketPoints, fetchChartHistory, fetchMultiChartHistory, liveNumericState, rangeMilliseconds, type ChartHistory, type MultiChartHistory } from "./chart-data";
 import { chartGeometry, multiChartGeometry } from "./chart-geometry";
 import { PRESETS, presetMetric } from "./presets";
-import type { ActionConfig, AreaGlanceConfig, AreaSignal, ChartConfig, ChartSeriesConfig, ChartType, EntityState, HassLike, MetricConfig, MetricPreset, StatusConfig } from "./types";
+import type { ActionConfig, AreaGlanceConfig, AreaReference, AreaSignal, ChartConfig, ChartSeriesConfig, ChartType, EntityState, HassLike, MetricConfig, MetricPreset, StatusConfig } from "./types";
 
 const UNAVAILABLE = new Set(["unknown", "unavailable", "none", ""]);
 const DEFAULT_METRICS = [presetMetric("temperature"), presetMetric("lights"), presetMetric("power"), presetMetric("device")];
@@ -945,9 +946,14 @@ export class AreaGlanceCard extends LitElement {
       { value: (geometry.max + geometry.min) / 2, y: plotHeight / 2 + 4 },
       { value: geometry.min, y: plotHeight - 2 },
     ];
+    const gridLines = chart.grid_lines ?? "none";
+    const showVerticalGrid = gridLines === "x" || gridLines === "both";
+    const showHorizontalGrid = gridLines === "y" || gridLines === "both";
     const unit = chart.unit ?? histories.find((history) => history.unit)?.unit ?? "";
     return svg`<svg class="chart-svg" width=${svgWidth} height=${svgHeight} viewBox=${`0 0 ${svgWidth} ${svgHeight}`} role="img" aria-label=${`${this._chartTitle()} multi-series history`} preserveAspectRatio="xMinYMid meet">
       <g transform=${`translate(${margin.left} ${margin.top})`}>
+        ${showHorizontalGrid ? scaleTicks.slice(0, -1).map((tick) => svg`<line class="chart-grid" x1="0" y1=${Math.max(0, tick.y - (tick.y === 5 ? 5 : 4))} x2=${plotWidth} y2=${Math.max(0, tick.y - (tick.y === 5 ? 5 : 4))}></line>`) : nothing}
+        ${showVerticalGrid ? ticks.filter((tick) => tick.x > 0 && tick.x < plotWidth).map((tick) => svg`<line class="chart-grid" x1=${tick.x} y1="0" x2=${tick.x} y2=${plotHeight}></line>`) : nothing}
         <line class="chart-axis chart-y-axis" x1="0" y1="0" x2="0" y2=${plotHeight}></line><line class="chart-axis" x1="0" y1=${plotHeight} x2=${plotWidth} y2=${plotHeight}></line>
         ${geometry.min < 0 ? svg`<line class="chart-zero" x1="0" y1=${geometry.baseline} x2=${plotWidth} y2=${geometry.baseline}></line>` : nothing}
         ${geometry.series.map((shape, index) => svg`${shape.areaPath ? svg`<path class="chart-area multi" style=${`fill:${this._seriesColour(index, series[index])}`} d=${shape.areaPath}></path>` : nothing}<path class="chart-line multi" style=${`stroke:${this._seriesColour(index, series[index])}`} d=${shape.path}></path>`)}
@@ -1019,6 +1025,25 @@ export class AreaGlanceCard extends LitElement {
       { value: (geometry.max + geometry.min) / 2, y: plotHeight / 2 + 4 },
       { value: geometry.min, y: plotHeight - 2 },
     ];
+    const gridLines = chart.grid_lines ?? "none";
+    const showVerticalGrid = (type === "line" || type === "area") && (gridLines === "x" || gridLines === "both");
+    const showHorizontalGrid = (type === "line" || type === "area") && (gridLines === "y" || gridLines === "both");
+    const showDailyHorizontalGrid = type === "daily_totals" && chart.daily_horizontal_grid === true;
+    // `week_end` shipped first, so continue to honour it. The editor now
+    // presents the more familiar positive choice: Monday- or Sunday-start.
+    const weekEnd = chart.week_start === "sunday" ? "saturday" : chart.week_start === "monday" ? "sunday" : chart.week_end ?? "sunday";
+    // Daily bars already provide their own rhythm. A single divider at the
+    // selected week boundary is clearer than applying a dense vertical grid.
+    const dailyWeekDividers = type === "daily_totals" && chart.daily_week_dividers
+      ? geometry.bars.flatMap((bar, index) => {
+        const date = new Date(geometry.points[index]?.time ?? end);
+        const boundaryDay = weekEnd === "saturday" ? 6 : 0;
+        if (date.getDay() !== boundaryDay) return [];
+        const next = geometry.bars[index + 1];
+        const x = next ? (bar.x + bar.width + next.x) / 2 : Math.min(plotWidth, bar.x + bar.width + (plotWidth - (bar.x + bar.width)) / 2);
+        return x > 0 && x < plotWidth ? [x] : [];
+      })
+      : [];
     const positiveClip = `${this._chartSvgId}-positive`;
     const negativeClip = `${this._chartSvgId}-negative`;
     const chartColours = `--area-glance-chart-positive:${chart.positive_color ?? "var(--primary-text-color)"};--area-glance-chart-negative:${chart.negative_color ?? "var(--orange-color, #e85d20)"};--area-glance-chart-daily-primary:${chart.daily_primary_color ?? "color-mix(in srgb, var(--primary-text-color) 62%, transparent)"};--area-glance-chart-weekend:${chart.weekend_color ?? "color-mix(in srgb, var(--primary-text-color) 76%, transparent)"};--area-glance-chart-today:${chart.today_color ?? "var(--orange-color, #e85d20)"};`;
@@ -1028,6 +1053,10 @@ export class AreaGlanceCard extends LitElement {
     return svg`<svg class="chart-svg" style=${chartColours} width=${svgWidth} height=${svgHeight} viewBox=${`0 0 ${svgWidth} ${svgHeight}`} role="img" aria-label=${`${this._chartTitle()} history`} preserveAspectRatio="xMinYMid meet">
       <g transform=${`translate(${margin.left} ${margin.top})`}>
       <defs><clipPath id=${positiveClip}><rect x="0" y="0" width=${plotWidth} height=${Math.max(0, geometry.baseline)}></rect></clipPath><clipPath id=${negativeClip}><rect x="0" y=${geometry.baseline} width=${plotWidth} height=${Math.max(0, plotHeight - geometry.baseline)}></rect></clipPath></defs>
+      ${showHorizontalGrid ? scaleTicks.slice(0, -1).map((tick) => svg`<line class="chart-grid" x1="0" y1=${Math.max(0, tick.y - (tick.y === 5 ? 5 : 4))} x2=${plotWidth} y2=${Math.max(0, tick.y - (tick.y === 5 ? 5 : 4))}></line>`) : nothing}
+      ${showDailyHorizontalGrid ? scaleTicks.slice(0, -1).map((tick) => svg`<line class="chart-grid" x1="0" y1=${Math.max(0, tick.y - (tick.y === 5 ? 5 : 4))} x2=${plotWidth} y2=${Math.max(0, tick.y - (tick.y === 5 ? 5 : 4))}></line>`) : nothing}
+      ${showVerticalGrid ? timeTicks.filter((tick) => tick.x > 0 && tick.x < plotWidth).map((tick) => svg`<line class="chart-grid" x1=${tick.x} y1="0" x2=${tick.x} y2=${plotHeight}></line>`) : nothing}
+      ${dailyWeekDividers.map((x) => svg`<line class="chart-grid chart-week-divider" x1=${x} y1="0" x2=${x} y2=${plotHeight}></line>`)}
       <line class="chart-axis chart-y-axis" x1="0" y1="0" x2="0" y2=${plotHeight}></line><line class="chart-axis" x1="0" y1=${plotHeight} x2=${plotWidth} y2=${plotHeight}></line>
       ${(filled || type === "columns" || type === "daily_totals" || geometry.min < 0) ? svg`<line class="chart-zero" x1="0" y1=${geometry.baseline} x2=${plotWidth} y2=${geometry.baseline}></line>` : nothing}
       ${type === "columns" || type === "daily_totals" ? geometry.bars.map((bar, index) => {
@@ -1062,9 +1091,17 @@ export class AreaGlanceCard extends LitElement {
     return this._metric({ ...metric, energy_source: undefined, entity, source: "entity" });
   }
 
-  private _areaName(area?: string): string | undefined {
-    if (!area) return undefined;
-    return this.hass?.areas?.[area]?.name ?? area.replaceAll("_", " ").replace(/\b\w/g, (l) => l.toUpperCase());
+  private _resolvedArea(area?: AreaReference): string | undefined {
+    return resolvedAreaId(this.hass, area);
+  }
+
+  private _areaName(area?: AreaReference): string | undefined {
+    const resolved = this._resolvedArea(area);
+    if (!resolved) {
+      const resolution = resolveAreaReference(this.hass, area);
+      return resolution.unavailable ? `Showcase area ${resolution.showcaseSlot} unavailable` : undefined;
+    }
+    return this.hass?.areas?.[resolved]?.name ?? resolved.replaceAll("_", " ").replace(/\b\w/g, (l) => l.toUpperCase());
   }
 
   private _headerAreaIcon(title: string): string {
@@ -1086,8 +1123,12 @@ export class AreaGlanceCard extends LitElement {
     return "mdi:map-marker-radius-outline";
   }
 
-  private _areaEntities(area: string | undefined, domain?: string): string[] {
-    return areaEntityIds(this.hass, area, domain);
+  private _areaEntities(area: AreaReference | undefined, domain?: string): string[] {
+    const resolution = resolveAreaReference(this.hass, area);
+    // A missing showcase slot must not accidentally become a whole-home
+    // aggregate merely because it has no corresponding area ID.
+    if (resolution.unavailable) return [];
+    return areaEntityIds(this.hass, resolution.areaId, domain);
   }
 
   private _metricSource(metric: MetricConfig, preset: MetricPreset): "area" | "entity" | "entities" {
@@ -1097,13 +1138,13 @@ export class AreaGlanceCard extends LitElement {
     return metric.source ?? (metric.entity ? "entity" : AREA_MEASUREMENT_PRESETS.has(preset) || preset === "blinds" ? "area" : "entity");
   }
 
-  private _aggregateEntityIds(metric: MetricConfig, preset: MetricPreset, area?: string): string[] {
+  private _aggregateEntityIds(metric: MetricConfig, preset: MetricPreset, area?: AreaReference): string[] {
     return this._metricSource(metric, preset) === "entities"
       ? metric.entities ?? []
       : this._areaEntities(area, preset === "lights" ? metric.domain ?? "light" : undefined);
   }
 
-  private _areaSignalSummary(area: string | undefined, signal: AreaSignal, metric?: MetricConfig): AreaSignalSummary {
+  private _areaSignalSummary(area: AreaReference | undefined, signal: AreaSignal, metric?: MetricConfig): AreaSignalSummary {
     const candidates = this._aggregateEntityIds(metric ?? {}, metric?.preset ?? signal, area)
       .map((entityId) => ({ entityId, state: this.hass?.states[entityId] }))
       .filter((entry): entry is { entityId: string; state: EntityState } => entry.state !== undefined && !UNAVAILABLE.has(entry.state.state) && isSignalEntity(signal, entry.entityId, entry.state));
@@ -1119,15 +1160,15 @@ export class AreaGlanceCard extends LitElement {
    * has no explicit membership of its own, inherit the matching area insight's
    * exclusions so “Doors: Closed” cannot sit beside “1 opening”.
    */
-  private _securityMembership(preset: MetricPreset, area: string | undefined, statusMembership?: StatusConfig["membership"]): StatusConfig["membership"] {
+  private _securityMembership(preset: MetricPreset, area: AreaReference | undefined, statusMembership?: StatusConfig["membership"]): StatusConfig["membership"] {
     if (statusMembership) return statusMembership;
     const metric = this._config?.metrics?.find((candidate) => candidate.preset === preset
       && this._metricSource(candidate, preset) === "area"
-      && (candidate.area ?? this._config?.area) === area);
+      && this._resolvedArea(candidate.area ?? this._config?.area) === this._resolvedArea(area));
     return metric?.membership;
   }
 
-  private _securitySummary(area = this._config?.area, membership?: StatusConfig["membership"]): SecuritySummary {
+  private _securitySummary(area: AreaReference | undefined = this._config?.area, membership?: StatusConfig["membership"]): SecuritySummary {
     const membershipMetric = (preset: MetricPreset): MetricConfig => ({ preset, source: "area", membership: this._securityMembership(preset, area, membership) });
     const alarmCandidates = this._areaEntities(area)
       .map((entityId) => ({ entityId, state: this.hass?.states[entityId] }))
@@ -2144,6 +2185,8 @@ export class AreaGlanceCard extends LitElement {
     .chart-plot:hover { background:color-mix(in srgb, var(--area-glance-accent) 5%, transparent); border-radius:8px; }
     .chart-svg { display:block; width:100%; height:100%; min-height:0; overflow:visible; }
     .chart-axis, .chart-zero { stroke:color-mix(in srgb, var(--primary-text-color) 30%, transparent); stroke-width:1; vector-effect:non-scaling-stroke; }
+    .chart-grid { stroke:color-mix(in srgb, var(--primary-text-color) 10%, transparent); stroke-width:1; vector-effect:non-scaling-stroke; }
+    .chart-week-divider { stroke:color-mix(in srgb, var(--primary-text-color) 16%, transparent); }
     .chart-zero { stroke:color-mix(in srgb, var(--primary-text-color) 46%, transparent); }
     .chart-line { fill:none; stroke-width:1.7; vector-effect:non-scaling-stroke; }
     .chart-line.positive { stroke:var(--area-glance-chart-positive, var(--primary-text-color)); }
@@ -2562,6 +2605,7 @@ export class AreaGlanceCardEditor extends LitElement {
       ${series.length < 3 ? html`<button class="add-insight" @click=${this._addMultiSeries}>Add line</button>` : nothing}${unitMismatch ? html`<p class="editor-warning">${unitMismatch}</p>` : nothing}
       <details class="more-options"><summary>Fine tuning (optional)</summary>
         <label>Display<select .value=${chart.multi_display ?? "overlap"} @change=${(event: Event) => this._multiSeriesChanged(series, { multi_display: (event.target as HTMLSelectElement).value as "overlap" | "stacked" })}><option value="overlap">Overlapping lines (default)</option><option value="stacked" ?disabled=${Boolean(unitMismatch) || !allNonNegative}>Stacked areas</option></select></label><p class="slot-hint">Stacked areas are available only for compatible non-negative readings. Overlap keeps every line independent.</p>
+        <label>Grid lines<select .value=${chart.grid_lines ?? "none"} @change=${(event: Event) => this._multiSeriesChanged(series, { grid_lines: (event.target as HTMLSelectElement).value as NonNullable<ChartConfig["grid_lines"]> })}><option value="none">None (default)</option><option value="x">Vertical, time guides</option><option value="y">Horizontal, value guides</option><option value="both">Both axes</option></select></label><p class="slot-hint">Faint guides align to the visible time and value-axis labels, behind the lines.</p>
         <div class="two"><label>Value-axis minimum<input type="number" step="any" .value=${chart.axis_min?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._multiSeriesChanged(series, { axis_min: value === "" ? undefined : Number(value) }); }}></label><label>Value-axis maximum<input type="number" step="any" .value=${chart.axis_max?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._multiSeriesChanged(series, { axis_max: value === "" ? undefined : Number(value) }); }}></label></div>
         <div class="two"><label>Decimals<input type="number" min="0" max="4" .value=${chart.decimals?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._multiSeriesChanged(series, { decimals: value === "" ? undefined : Number(value) }); }}></label><label>Unit override<input .value=${chart.unit ?? ""} placeholder="Home Assistant unit" @input=${(event: Event) => this._multiSeriesChanged(series, { unit: (event.target as HTMLInputElement).value || undefined })}></label></div>
         <label>Data source<select .value=${chart.history_source ?? "auto"} @change=${(event: Event) => this._multiSeriesChanged(series, { history_source: (event.target as HTMLSelectElement).value as ChartConfig["history_source"] })}><option value="auto">Automatic</option><option value="raw">Recorder history</option><option value="statistics">Long-term statistics</option></select></label>
@@ -2586,8 +2630,11 @@ export class AreaGlanceCardEditor extends LitElement {
       ${type !== "daily_totals" ? html`<label>Or use Energy Dashboard<select .value=${chart.energy_source ?? ""} @change=${this._chartEnergySourceChanged}><option value="">Direct entity (recommended)</option>${type === "columns" || type === "line" ? html`<option value="grid">Grid import / export</option>` : nothing}<option value="solar">Solar generation</option><option value="battery_soc">Battery charge</option><option value="battery_power">Battery flow</option></select></label>` : nothing}
       <details class="more-options"><summary>Fine tuning (optional)</summary>
         ${type === "line" ? html`<label class="checkbox"><input type="checkbox" .checked=${chart.show_area !== false} @change=${(event: Event) => this._chartChanged({ show_area: (event.target as HTMLInputElement).checked })}> Fill beneath the line</label><p class="slot-hint">A filled chart is the default. Turn it off for a lighter, unfilled line.</p>` : nothing}
+        ${type === "line" ? html`<label>Grid lines<select .value=${chart.grid_lines ?? "none"} @change=${(event: Event) => this._chartChanged({ grid_lines: (event.target as HTMLSelectElement).value as NonNullable<ChartConfig["grid_lines"]> })}><option value="none">None (default)</option><option value="x">Vertical, time guides</option><option value="y">Horizontal, value guides</option><option value="both">Both axes</option></select></label><p class="slot-hint">Faint guides align to the visible time and value-axis labels, behind the line.</p>` : nothing}
         ${type === "line" || type === "columns" ? html`<div class="two"><label>Positive colour<input type="color" .value=${chart.positive_color ?? "#263238"} @input=${(event: Event) => this._chartChanged({ positive_color: (event.target as HTMLInputElement).value })}></label><label>Negative / export colour<input type="color" .value=${chart.negative_color ?? "#e85d20"} @input=${(event: Event) => this._chartChanged({ negative_color: (event.target as HTMLInputElement).value })}></label></div><p class="slot-hint">Orange marks values below zero, such as grid export. Leave the defaults for the restrained chart style.</p>` : nothing}
         ${daily ? html`<div class="three"><label>Primary colour<input type="color" .value=${chart.daily_primary_color ?? "#6b7280"} @input=${(event: Event) => this._chartChanged({ daily_primary_color: (event.target as HTMLInputElement).value })}></label><label>Weekend colour<input type="color" .value=${chart.weekend_color ?? "#4f555b"} @input=${(event: Event) => this._chartChanged({ weekend_color: (event.target as HTMLInputElement).value })}></label><label>Today colour<input type="color" .value=${chart.today_color ?? "#e85d20"} @input=${(event: Event) => this._chartChanged({ today_color: (event.target as HTMLInputElement).value })}></label></div><p class="slot-hint">Weekends are darker than completed weekdays. Today is highlighted because it is incomplete.</p>` : nothing}
+        ${daily ? html`<label class="checkbox"><input type="checkbox" .checked=${chart.daily_horizontal_grid === true} @change=${(event: Event) => this._chartChanged({ daily_horizontal_grid: (event.target as HTMLInputElement).checked })}> Show horizontal value guides</label><p class="slot-hint">Faint guides align to the visible value-axis labels and sit behind the bars.</p>` : nothing}
+        ${daily ? html`<label class="checkbox"><input type="checkbox" .checked=${chart.daily_week_dividers === true} @change=${(event: Event) => this._chartChanged({ daily_week_dividers: (event.target as HTMLInputElement).checked })}> Show week dividers</label>${chart.daily_week_dividers ? html`<label>Week starts on<select .value=${chart.week_start ?? (chart.week_end === "saturday" ? "sunday" : "monday")} @change=${(event: Event) => this._chartChanged({ week_start: (event.target as HTMLSelectElement).value as "monday" | "sunday", week_end: undefined })}><option value="monday">Monday (default)</option><option value="sunday">Sunday</option></select></label><p class="slot-hint">A faint divider is drawn at the end of each calendar week, behind the bars.</p>` : nothing}` : nothing}
         <div class="two"><label>Value-axis minimum<input type="number" step="any" .value=${chart.axis_min?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._chartChanged({ axis_min: value === "" ? undefined : Number(value) }); }}></label><label>Value-axis maximum<input type="number" step="any" .value=${chart.axis_max?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._chartChanged({ axis_max: value === "" ? undefined : Number(value) }); }}></label></div><p class="slot-hint">Optional fixed limits for the plotted values. Leave both blank to keep the automatic scale.</p>
         <div class="two"><label>Decimals<input type="number" min="0" max="4" .value=${chart.decimals?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._chartChanged({ decimals: value === "" ? undefined : Number(value) }); }}></label><label>Unit override<input .value=${chart.unit ?? ""} placeholder="Home Assistant unit" @input=${(event: Event) => this._chartChanged({ unit: (event.target as HTMLInputElement).value || undefined })}></label></div>
         <label>Data source<select .value=${chart.history_source ?? "auto"} @change=${(event: Event) => this._chartChanged({ history_source: (event.target as HTMLSelectElement).value as ChartConfig["history_source"] })}><option value="auto">Automatic</option><option value="raw">Recorder history</option><option value="statistics">Long-term statistics</option></select></label>
@@ -2647,11 +2694,23 @@ export class AreaGlanceCardEditor extends LitElement {
     this._change({ appearance: { ...this._config.appearance, text_scale: undefined } });
   }
   private _pickerValue(event: Event): string { return (event as CustomEvent<{ value?: string }>).detail?.value ?? ""; }
-  private _areaName(area: string): string {
-    return this.hass?.areas?.[area]?.name ?? area.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  private _areaPickerValue(area?: AreaReference): string {
+    return resolvedAreaId(this.hass, area) ?? "";
   }
-  private _entitiesInArea(area: string): string[] {
-    return areaEntityIds(this.hass, area);
+  private _showcaseAreaHint(area?: AreaReference) {
+    const resolution = resolveAreaReference(this.hass, area);
+    if (resolution.showcaseSlot === undefined) return nothing;
+    return html`<p class="slot-hint">Showcase area ${resolution.showcaseSlot} ${resolution.areaId ? `resolves to ${this._areaName(area)} on this Home Assistant instance.` : "is not available on this Home Assistant instance."}</p>`;
+  }
+  private _areaName(area?: AreaReference): string {
+    const resolution = resolveAreaReference(this.hass, area);
+    if (resolution.unavailable) return `Showcase area ${resolution.showcaseSlot} unavailable`;
+    const areaId = resolution.areaId;
+    return areaId ? this.hass?.areas?.[areaId]?.name ?? areaId.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "this area";
+  }
+  private _entitiesInArea(area?: AreaReference): string[] {
+    const resolution = resolveAreaReference(this.hass, area);
+    return resolution.unavailable ? [] : areaEntityIds(this.hass, resolution.areaId);
   }
   private _sourceForEditor(metric: MetricConfig, preset: MetricPreset): "area" | "entity" | "entities" {
     if (preset === "attention") return "area";
@@ -2695,7 +2754,7 @@ export class AreaGlanceCardEditor extends LitElement {
     const noun = preset === "lights" ? "light" : preset === "blinds" ? "blind" : "compatible sensor";
     return `Using ${count} ${noun}${count === 1 ? "" : "s"} ${location}.`;
   }
-  private _inferredProfile(area: string, requested: NonNullable<AreaGlanceConfig["profile"]>): Exclude<NonNullable<AreaGlanceConfig["profile"]>, "auto"> {
+  private _inferredProfile(area: AreaReference | undefined, requested: NonNullable<AreaGlanceConfig["profile"]>): Exclude<NonNullable<AreaGlanceConfig["profile"]>, "auto"> {
     if (requested !== "auto") return requested;
     if (!area) return "house";
     const name = this._areaName(area).toLowerCase();
@@ -2704,7 +2763,7 @@ export class AreaGlanceCardEditor extends LitElement {
     if (/(living|lounge|family|den|media|cinema|tv)/.test(name)) return "media";
     return "room";
   }
-  private _populateAreaPreset(area: string, requestedProfile = this._config.profile ?? "auto") {
+  private _populateAreaPreset(area: AreaReference | undefined, requestedProfile = this._config.profile ?? "auto") {
     const profile = this._inferredProfile(area, requestedProfile);
     if (profile === "energy" && !area) {
       this._suggestionsNeedUpdate = false;
@@ -3141,7 +3200,7 @@ export class AreaGlanceCardEditor extends LitElement {
         <div class="purpose-grid">
           ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"], ["security", "Security", "Home security"], ["cameras", "Cameras", "Live camera feeds"], ["chart", "Chart", "Compact history"] ] as const).map(([value, title, description]) => html`<button class="purpose ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
         </div>
-        ${purpose === "chart" ? html`<p class="applied">A dedicated chart uses one selected source. Its live summary updates immediately; recorded history refreshes calmly in the background.</p>` : purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "battery" || purpose === "cameras" ? html`<p class="applied">${purpose === "energy" ? "System-wide live insights come from the Energy Dashboard setup. If it is not configured, add your own entity insights below." : purpose === "battery" ? "Battery charge, flow, solar, and grid readings come from the Energy Dashboard setup. If it is not configured, replace those slots with your own entity insights." : purpose === "security" ? "Whole-home security suggestions are applied." : purpose === "cameras" ? "Up to three feeds are selected: one lower-resolution camera per device where Home Assistant exposes that information." : "Whole-home suggestions are applied."} You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._config.area ?? ""} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
+        ${purpose === "chart" ? html`<p class="applied">A dedicated chart uses one selected source. Its live summary updates immediately; recorded history refreshes calmly in the background.</p>` : purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "battery" || purpose === "cameras" ? html`<p class="applied">${purpose === "energy" ? "System-wide live insights come from the Energy Dashboard setup. If it is not configured, add your own entity insights below." : purpose === "battery" ? "Battery charge, flow, solar, and grid readings come from the Energy Dashboard setup. If it is not configured, replace those slots with your own entity insights." : purpose === "security" ? "Whole-home security suggestions are applied." : purpose === "cameras" ? "Up to three feeds are selected: one lower-resolution camera per device where Home Assistant exposes that information." : "Whole-home suggestions are applied."} You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._areaPickerValue(this._config.area)} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._showcaseAreaHint(this._config.area)}${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
       </section>
       ${purpose === "chart" ? html`<section class="card-layout">
         <span class="section-label">What layout does this card have?</span>
@@ -3199,7 +3258,7 @@ export class AreaGlanceCardEditor extends LitElement {
           <select .value=${metric.attention_scope ?? "area"} @change=${(e: Event) => this._attentionScopeChanged(index, e)}><option value="area">This area (or all when blank)</option><option value="home">Whole home</option></select>
         </label>
         <details class="attention-options"><summary>What needs attention</summary><label class="checkbox"><input type="checkbox" .checked=${selectedAttentionTypes.has("unavailable")} ?disabled=${selectedAttentionTypes.size === 1 && selectedAttentionTypes.has("unavailable")} @change=${(e: Event) => this._attentionTypeChanged(index, "unavailable", e)}> Unavailable entities</label><label class="checkbox"><input type="checkbox" .checked=${selectedAttentionTypes.has("updates")} ?disabled=${selectedAttentionTypes.size === 1 && selectedAttentionTypes.has("updates")} @change=${(e: Event) => this._attentionTypeChanged(index, "updates", e)}> Updates available</label><p class="slot-hint">At least one check stays enabled. Updates use Home Assistant Update entities, with compatibility for legacy update binary sensors.</p></details>` : nothing}
-        ${usesArea && !(preset === "attention" && metric.attention_scope === "home") ? html`<ha-area-picker .hass=${this.hass} .value=${metric.area ?? this._config.area ?? ""} .label=${preset === "attention" ? "Area to check (leave blank for all)" : preset === "lights" ? "Area to count (leave blank for all)" : preset === "blinds" ? "Area with blinds (leave blank for all)" : "Area to summarise (leave blank for all)"} @value-changed=${(e: Event) => this._updateMetric(index, { source: "area", area: this._pickerValue(e) })}></ha-area-picker>` : nothing}
+        ${usesArea && !(preset === "attention" && metric.attention_scope === "home") ? html`<ha-area-picker .hass=${this.hass} .value=${this._areaPickerValue(metric.area ?? this._config.area)} .label=${preset === "attention" ? "Area to check (leave blank for all)" : preset === "lights" ? "Area to count (leave blank for all)" : preset === "blinds" ? "Area with blinds (leave blank for all)" : "Area to summarise (leave blank for all)"} @value-changed=${(e: Event) => this._updateMetric(index, { source: "area", area: this._pickerValue(e) })}></ha-area-picker>${this._showcaseAreaHint(metric.area ?? this._config.area)}` : nothing}
         ${usesArea && contributorHint ? html`<p class="contributor-hint">${contributorHint}</p>` : nothing}
         ${usesSelectedEntities ? html`<div class="selected-entities"><p class="slot-hint">Choose compatible entities from anywhere in Home Assistant. They are combined using the option below.</p>${(metric.entities ?? []).map((entityId, entityIndex) => html`<div class="selected-entity"><ha-entity-picker .hass=${this.hass} .value=${entityId} .label=${`${PRESETS[preset].label} entity ${entityIndex + 1}`} allow-custom-entity @value-changed=${(e: Event) => this._selectedEntityChanged(index, entityIndex, e)}></ha-entity-picker><button class="remove-rule" aria-label="Remove selected entity" @click=${() => this._removeSelectedEntity(index, entityIndex)}>Remove</button></div>`)}${!(metric.entities?.length) ? html`<p class="slot-hint">Add the entities you want to combine.</p>` : nothing}<button class="add-rule" @click=${() => this._addSelectedEntity(index)}>Add entity</button>${selectedCandidates.length ? nothing : html`<p class="slot-hint">No compatible entities are currently detected, but you can still enter an entity ID manually.</p>`}</div>` : nothing}
         ${requiresEntity ? html`<ha-entity-picker .hass=${this.hass} .value=${metric.entity ?? ""} .label=${preset === "custom" ? "Main text entity" : preset === "device" ? "Device or entity" : preset === "vacuum" ? "Robot vacuum" : `${PRESETS[preset].label} entity`} allow-custom-entity @value-changed=${(e: Event) => this._updateMetric(index, { source: "entity", entity: this._pickerValue(e) })}></ha-entity-picker>` : nothing}
@@ -3253,7 +3312,7 @@ export class AreaGlanceCardEditor extends LitElement {
           ${status ? html`
             <label>Status comes from<select .value=${statusSource} @change=${this._statusSourceChanged}><option value="security">Whole-home security</option><option value="area_presence">Presence in this area</option><option value="area_motion">Motion in this area</option><option value="area_doors">Doors in this area</option><option value="area_windows">Windows in this area</option><option value="area_leaks">Water leaks in this area</option><option value="entity">A specific entity</option></select></label>
             ${statusSource === "security" ? html`<p class="slot-hint">Security checks recognised alarms, doors, windows, and locks. Leave the area empty for the whole home.</p>` : nothing}
-            ${usesAreaStatus ? html`<ha-area-picker .hass=${this.hass} .value=${status.area ?? this._config.area ?? ""} .label=${statusAreaLabel} @value-changed=${this._statusAreaChanged}></ha-area-picker>` : html`<ha-entity-picker .hass=${this.hass} .value=${status.entity ?? ""} .label="Status entity" allow-custom-entity @value-changed=${(e: Event) => this._change({ status: { ...status, source: "entity", entity: this._pickerValue(e) } })}></ha-entity-picker>`}
+            ${usesAreaStatus ? html`<ha-area-picker .hass=${this.hass} .value=${this._areaPickerValue(status.area ?? this._config.area)} .label=${statusAreaLabel} @value-changed=${this._statusAreaChanged}></ha-area-picker>${this._showcaseAreaHint(status.area ?? this._config.area)}` : html`<ha-entity-picker .hass=${this.hass} .value=${status.entity ?? ""} .label="Status entity" allow-custom-entity @value-changed=${(e: Event) => this._change({ status: { ...status, source: "entity", entity: this._pickerValue(e) } })}></ha-entity-picker>`}
             ${usesAreaStatus ? html`<details class="membership"><summary>${wholeHomeStatus ? "Exclude entities from this home" : "Exclude entities from this area"}</summary><p class="slot-hint">New compatible entities are included automatically. Uncheck anything you want to leave out of this status.</p>${statusCandidates.length ? html`<div class="membership-list">${statusCandidates.map((entityId) => html`<label class="member"><input type="checkbox" .checked=${includedStatusEntities.has(entityId)} @change=${(e: Event) => this._statusMembershipEntityChanged(entityId, e)}><span><strong>${this._entityName(entityId)}</strong><small>${entityId} · ${this.hass?.states[entityId]?.state ?? "unknown"}</small></span></label>`)}</div>` : html`<p class="slot-hint">No compatible entities are currently available for this status.</p>`}${status.membership ? html`<button class="reset-membership" @click=${this._resetStatusMembership}>Reset to automatic membership</button>` : nothing}</details>` : nothing}
             <label>When the status is tapped<select .value=${statusAction} @change=${this._statusActionChanged}><option value="none">Do nothing</option>${usesAreaStatus ? html`<option value="status-details">Show matching entities</option><option value="area-details">Show area details</option>` : html`<option value="more-info">Show entity details</option>`}<option value="navigate">Navigate to a dashboard page</option></select></label>
             ${statusAction === "navigate" ? html`<label>Dashboard path <input .value=${status.navigation_path ?? ""} placeholder="/dashboard/room" @input=${this._statusNavigationChanged}></label>` : nothing}

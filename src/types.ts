@@ -30,6 +30,9 @@ export type MetricPreset =
 
 export type AreaSignal = "motion" | "presence" | "doors" | "windows" | "blinds" | "locks" | "leaks";
 
+/** A literal Home Assistant area ID, or a one-based portable showcase slot. */
+export type AreaReference = string | number;
+
 export interface EntityState {
   state: string;
   last_changed: string;
@@ -89,6 +92,16 @@ export interface ChartConfig {
   entities?: ChartSeriesConfig[];
   /** Shared-axis line overlay or non-negative cumulative areas. */
   multi_display?: "overlap" | "stacked";
+  /** Optional faint guides, aligned to the visible chart axes. */
+  grid_lines?: "none" | "x" | "y" | "both";
+  /** Daily-total charts can divide complete calendar weeks without a full grid. */
+  daily_week_dividers?: boolean;
+  /** Optional faint horizontal guides at the daily chart's value-axis labels. */
+  daily_horizontal_grid?: boolean;
+  /** The calendar day after which a daily-total week divider is drawn. */
+  week_end?: "saturday" | "sunday";
+  /** Preferred, more familiar expression of the calendar convention. */
+  week_start?: "monday" | "sunday";
   /** Entity opened by a normal chart tap; defaults to the first series. */
   primary_entity?: string;
   /** A source explicitly configured in Home Assistant's Energy Dashboard. */
@@ -129,7 +142,7 @@ export interface AggregateMembership {
 
 export interface StatusConfig extends ActionConfig {
   source?: "security" | "area_motion" | "area_presence" | "area_doors" | "area_windows" | "area_leaks" | "entity";
-  area?: string;
+  area?: AreaReference;
   active_text?: string;
   inactive_text?: string;
   active_color?: string;
@@ -170,7 +183,7 @@ export interface MetricConfig extends ActionConfig {
   attention_types?: ("unavailable" | "updates")[];
   /** Attention can check the card's area or the whole Home Assistant instance. */
   attention_scope?: "area" | "home";
-  area?: string;
+  area?: AreaReference;
   domain?: string;
   label?: string;
   icon?: string;
@@ -205,7 +218,7 @@ export interface MetricConfig extends ActionConfig {
 export interface AreaGlanceConfig extends ActionConfig {
   type?: string;
   title?: string;
-  area?: string;
+  area?: AreaReference;
   status?: StatusConfig;
   metrics?: MetricConfig[];
   /** Chart is a dedicated header-plus-plot profile, rather than an insight slot. */

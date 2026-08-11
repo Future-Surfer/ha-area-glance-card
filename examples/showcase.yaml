@@ -1,0 +1,49 @@
+# Area Glance portable showcase
+#
+# Numeric `area` values are one-based showcase slots. On each Home Assistant
+# installation the card resolves them from that installation's sorted area IDs,
+# then uses the real area for titles, suggestions, aggregates and actions.
+# Replace a numeric slot with a normal area ID when you want a card fixed to
+# one specific room.
+type: vertical-stack
+cards:
+  - type: custom:area-glance-card
+    area: 1
+    height: slim
+
+  - type: custom:area-glance-card
+    area: 2
+    layout: stacked
+    appearance:
+      preset: light
+      show_area_icon: true
+
+  - type: custom:area-glance-card
+    area: 3
+    layout: tower
+    appearance:
+      show_insight_icons: false
+      insight_icon_color: grey
+
+  - type: custom:area-glance-card
+    profile: house
+    title: House
+    appearance:
+      preset: charcoal
+      shadow_style: drop
+
+  - type: custom:area-glance-card
+    profile: energy
+    title: Energy
+    layout: stacked
+
+  - type: custom:area-glance-card
+    profile: cameras
+    title: Cameras
+
+  - type: custom:area-glance-card
+    profile: chart
+    chart:
+      type: line
+      entity: sensor.outdoor_temperature
+      hours_to_show: 24

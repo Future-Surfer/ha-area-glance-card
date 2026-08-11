@@ -19,6 +19,12 @@ type: custom:area-glance-card
 area: living_room
 ```
 
+## Portable showcase
+
+[The maintained showcase stack](examples/showcase.yaml) demonstrates the principal layouts, profiles, and appearance options in one vertical stack. Its `area: 1`, `area: 2`, and `area: 3` entries are portable showcase slots: they resolve to the first, second, and third real areas on the current Home Assistant installation, then use those actual areas for titles, suggestions, and aggregates.
+
+For ordinary dashboard cards, continue to use your normal Home Assistant area ID such as `area: living_room`. A missing showcase slot stays empty; it never falls back to an unrelated room or whole-home aggregate.
+
 If HACS has not added the dashboard resource, add it manually:
 
 ```yaml

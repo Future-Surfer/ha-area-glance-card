@@ -22,11 +22,15 @@
 
 ## Appearance and polish
 
+- Added portable **showcase area slots**: YAML can use `area: 1`, `area: 2`, and so on to resolve the matching numbered area on each Home Assistant installation. The card then uses that real area's name, devices, suggestions, aggregate rules, and actions; the editor shows the resolved area without rewriting the portable shorthand.
 - Added an opt-in **Sunken** card shadow, alongside the existing raised shadow and no-shadow options.
 - Shadow opacity and spread can now be adjusted from the visual editor, with a reset to the documented defaults.
 - Added an opt-in **Show insight icons** appearance setting. Turn it off for a quieter, value-led band; ordinary insight values and labels gain modest extra emphasis.
 - Added **Insight icon colours**: keep the current preset colours, or use black or grey as a card-wide default while preserving any explicit per-insight colour, threshold, or state rule.
 - Chart-only text-size controls are now grouped with the existing card-wide typography controls, keeping the editor consistent while allowing axis and bar-label refinement.
+- Single- and multi-line charts can add faint horizontal, vertical, or two-axis guides that align to their visible labels and sit behind the plotted data.
+- Daily-total charts can optionally mark calendar week boundaries, with Monday- or Sunday-starting weeks to match the household's convention.
+- Daily-total charts can also add faint horizontal guides at their value-axis labels, independently of week dividers.
 
 ## Fixes and reliability work
 
@@ -41,6 +45,7 @@
 - Insight icons remain on unless `appearance.show_insight_icons: false` is chosen.
 - With `appearance.insight_icon_color` absent, existing preset and dynamic icon colours are unchanged.
 - Existing `appearance.shadow: false` configurations remain supported and map to **No shadow**. New `appearance.shadow_style` takes precedence when present.
+- Existing string `area:` IDs are unchanged. Numeric `area:` values are reserved for portable showcase slots and resolve against the current installation's sorted area IDs; a missing slot stays empty rather than becoming a whole-home aggregate.
 - Camera previews, analogue clocks, and calendar tiles retain their dedicated visual treatment when ordinary insight icons are hidden, so those slots do not lose their primary content.
 - The legacy `chart.type: area` configuration remains recognised. New single-entity line charts use the filled-area presentation by default; set `chart.show_area: false` for an unfilled line.
 - Charts are deliberately single-source except for the explicit multi-line mode. They do not aggregate history for an area or fabricate totals from a live power sensor.

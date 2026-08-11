@@ -44,6 +44,15 @@ Camera previews can be used individually or via the Cameras profile, which selec
 
 ## Roadmap
 
+### Loading states (exploration)
+
+**Goal:** Replace the plain loading message with a small, calm, recognisable Area Glance loading treatment that feels intentional while live data, history, or contributors are resolving.
+
+- Keep the layout stable: a loading state must reserve the final card geometry so a finished card does not jump.
+- Prefer a restrained motion/mark built from the existing visual language over a generic spinner; it must remain useful with reduced-motion preferences and never suggest that a live value is already known.
+- Use one shared loading primitive across standard bands, charts, contributor sheets, and the visual-editor preview, with an explicit unavailable/error state remaining distinct from loading.
+- Ensure the animation is lightweight, theme-aware, accessible, and bounded so a slow Home Assistant response does not become distracting.
+
 ### Visual style system (exploration)
 
 **Goal:** Let a small named visual style do more useful work than changing a colour palette, while preserving Home Assistant's theme and explicit user choices.
@@ -103,6 +112,44 @@ Camera previews can be used individually or via the Cameras profile, which selec
 - Validate the interaction in Card Lab before implementation: four-to-six room desktop stacks, narrow mobile tabs, tower series, missing area data, and mixed room capabilities.
 
 **Not in scope for the first version:** automatic dashboard generation, floorplans, persisted global navigation state, or claiming that a selected set of rooms represents complete home coverage.
+
+### Action insights (exploration)
+
+**Goal:** Let an insight become a calm, obvious control when its main job is changing a simple entity state, without weakening the card's dependable read-only summaries.
+
+- Add an opt-in **Action insight** for a deliberately small initial set of stateful entities: lights, switches, input booleans, fans, covers, locks, and any other domain only after its control semantics are clear and safe.
+- Present its current state and a familiar toggle affordance in the segment itself. The visual state must update promptly, recover gracefully if a service call fails, and remain truthful for unavailable entities.
+- Preserve existing tap, hold, and double-tap actions for ordinary insights. An Action insight owns its primary tap for the state change; any secondary action needs an explicit, discoverable treatment rather than an invisible gesture conflict.
+- Make controls opt-in in the editor. Automatic area presets should remain informational unless a future preset can make the benefit and consequences of direct control unmistakable.
+- Reuse Home Assistant's standard action/service patterns, confirmations where appropriate, contributor membership, and detail sheets. Never infer a safe aggregate control for a mixed group of entities.
+
+**Done when:** a user can add one explicitly chosen toggleable entity, understand its present state at a glance, and change it confidently without compromising the behaviour of existing insights.
+
+### Compact Pixel Cat visual profile (exploration)
+
+**Goal:** Explore a small, expressive Pixel Cat-inspired presentation as a named visual profile, while keeping the standard Area Glance card calm and broadly useful.
+
+- Review the existing Pixel Cat card/project before designing this mode; reuse only the visual ideas that fit Area Glance's compact, accessible, Home Assistant-native interaction model.
+- Treat it as a bounded named styleâ€”icon treatment, type scale/weight, spacing, dividers, and state emphasisâ€”not a second card implementation or a collection of arbitrary CSS controls.
+- Preserve explicit colours, threshold rules, accessibility contrast, and all existing layout behaviours. A user must be able to switch the style off without changing their entities or data model.
+- Prototype it in Card Lab beside the default and Precision directions at narrow and standard dashboard widths before exposing it in the editor.
+
+**Done when:** it feels like a coherent optional visual personality, not a novelty skin, and every existing card configuration renders and behaves identically apart from its intended presentation.
+
+### Adaptive showcase stack
+
+**Status:** Portable numeric area slots and the first maintained showcase YAML are implemented in the current development build. The showcase should grow with released features.
+
+**Goal:** Maintain one dashboard-ready vertical-stack YAML example that demonstrates the real breadth of Area Glance while adapting safely to a user's own areas.
+
+- Maintain `examples/showcase.yaml` covering the principal layouts, profiles, appearance choices, aggregate/detail behaviour, direct-entity examples, charts, and future Action insights where they are safe to demonstrate.
+- Home Assistant area IDs are already unique. The portable example therefore uses numeric `area: 1`, `area: 2`, and so on as explicit showcase slots, resolving them from the current instance's stable sorted area IDs without inventing or persisting fake room IDs.
+- Keep that resolution deterministic and visible: the same installation should resolve the same showcase slot consistently, a missing slot must produce a clear empty state rather than silently substituting an unrelated room, and real `area:` IDs must continue to work unchanged.
+- The editor shows the resolved real area while preserving an unchanged numeric slot in YAML. Selecting a different area deliberately converts that configuration to the ordinary real area ID.
+- Define eligibility conservatively: prefer areas with recognised, available entities so the showcase is useful, but retain their stable source ordering. Never select system-wide Energy, Security, Cameras, or Chart sources as if they were room areas.
+- Make the showcase a living compatibility fixture in Card Lab. Each new top-level profile, layout, or appearance mode must either gain a showcase card or be explicitly recorded as intentionally omitted; run the stack against rich, sparse, and fewer-than-requested-area mock homes.
+
+**Done when:** a user can paste one supported vertical stack into a dashboard, immediately see a representative set of cards based on their own installation, and maintainers have a clear test/checklist whenever the feature set grows.
 
 ### 1. Insight arranging workflow
 
