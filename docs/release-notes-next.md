@@ -39,6 +39,9 @@
 - The Cameras profile now selects up to three distinct camera devices. It
   avoids duplicate Clear/Fluent and main/sub-stream variants, preferring the
   lighter stream where a single physical camera publishes more than one feed.
+- Energy and Home battery insight sheets now list the actual Energy Dashboard
+  source entities behind their displayed values; Grid correctly shows both its
+  import and export contributors.
 - Portable numeric area slots now receive the same initial, area-aware
   suggestions as a newly chosen area in the visual editor, while any metrics
   explicitly written in YAML remain untouched.

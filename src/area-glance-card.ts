@@ -1166,6 +1166,15 @@ export class AreaGlanceCard extends LitElement {
     const source = metric.energy_source;
     if (!source) return undefined;
     const resolved = resolveEnergyChartSource(this._energyPreferences, this.hass, source);
+    // Energy Dashboard readings are deliberately not area aggregates, but
+    // their tap sheet should still truthfully expose the configured source(s).
+    // Keep that contributor list on the display object used by both rendering
+    // and interaction instead of attempting a second, incompatible lookup.
+    const withContributors = (resolvedMetric: MetricConfig, entities: (string | undefined)[]) => {
+      const display = this._metric(resolvedMetric);
+      if (!display) return undefined;
+      return { ...display, entities: [...new Set(entities.filter((entity): entity is string => Boolean(entity)))], aggregate: true };
+    };
     if (source === "grid") {
       const importEntity = resolved.importEntity;
       const exportEntity = resolved.exportEntity;
@@ -1174,11 +1183,11 @@ export class AreaGlanceCard extends LitElement {
       const exporting = exportValue !== undefined && Math.abs(exportValue) > Math.abs(importValue ?? 0);
       const entity = exporting ? exportEntity : importEntity;
       if (!entity) return undefined;
-      return this._metric({ ...metric, energy_source: undefined, entity, source: "entity", label: metric.label_mode === "custom" ? metric.label : exporting ? "Export" : "Import", icon: metric.icon ?? (exporting ? "mdi:transmission-tower-export" : "mdi:transmission-tower-import") });
+      return withContributors({ ...metric, energy_source: undefined, entity, source: "entity", label: metric.label_mode === "custom" ? metric.label : exporting ? "Export" : "Import", icon: metric.icon ?? (exporting ? "mdi:transmission-tower-export" : "mdi:transmission-tower-import") }, [importEntity, exportEntity]);
     }
     const entity = resolved.entity;
     if (!entity) return undefined;
-    return this._metric({ ...metric, energy_source: undefined, entity, source: "entity" });
+    return withContributors({ ...metric, energy_source: undefined, entity, source: "entity" }, [entity]);
   }
 
   private _resolvedArea(area?: AreaReference): string | undefined {
@@ -1822,18 +1831,19 @@ export class AreaGlanceCard extends LitElement {
     const area = metric.area ?? this._config?.area;
     const attention = metric.preset === "attention";
     const wholeHomeAttention = attention && metric.attention_scope === "home";
+    const energySource = Boolean(metric.energy_source);
     const lightControlPanel = metric.preset === "lights" && display.aggregate === true;
     const signalSummary = metric.preset && AREA_SIGNAL_PRESETS.has(metric.preset) ? display.value : undefined;
     this._detail = {
       title: display.label,
-      subtitle: attention ? wholeHomeAttention ? "Checked across your home" : `Checked in ${this._areaName(area) ?? "this area"}` : lightControlPanel ? this._areaName(area) ?? "Your home" : area ? `Included from ${this._areaName(area) ?? "this area"}` : "Included entities",
+      subtitle: energySource ? "Configured in your Energy Dashboard" : attention ? wholeHomeAttention ? "Checked across your home" : `Checked in ${this._areaName(area) ?? "this area"}` : lightControlPanel ? this._areaName(area) ?? "Your home" : area ? `Included from ${this._areaName(area) ?? "this area"}` : "Included entities",
       entities: display.entities ?? [],
       emptyMessage: attention ? "No entities currently need attention for the selected checks." : "No compatible entities are currently contributing to this insight.",
-      quickControls: display.aggregate === true,
+      quickControls: display.aggregate === true && !energySource,
       lightControlPanel,
       aggregatePanel: display.aggregate === true,
-      summary: !lightControlPanel && display.aggregate ? signalSummary ?? `${display.entities?.length ?? 0} included` : undefined,
-      statistics: display.aggregate && !lightControlPanel ? this._aggregateStatistics(metric, display.entities ?? []) : undefined,
+      summary: !lightControlPanel && display.aggregate ? energySource ? `${display.entities?.length ?? 0} configured source${(display.entities?.length ?? 0) === 1 ? "" : "s"}` : signalSummary ?? `${display.entities?.length ?? 0} included` : undefined,
+      statistics: display.aggregate && !lightControlPanel && !energySource ? this._aggregateStatistics(metric, display.entities ?? []) : undefined,
     };
   }
 

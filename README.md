@@ -1,93 +1,76 @@
 # Area Glance Card
 
-**Choose an area and get a compact, live summary of the things that matter there.**
+**A compact Home Assistant card that turns an area, home system, camera set, or sensor history into a clear live summary.**
 
 [![Open HACS repository on My Home Assistant](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Future-Surfer&repository=ha-area-glance-card&category=plugin)
 
 ![Choose an area, get useful insights](docs/screenshots/area-to-insights.png)
 
-## Get started
+Pick an area in the visual editor and Area Glance suggests the useful things already assigned to it. Keep the suggestions, swap them, or build a deliberate summary from selected entities.
+
+## Start here
 
 1. Install with HACS using the button above.
 2. Add **Area Glance Card** to a dashboard and open its visual editor.
 3. Choose **An area**, select a room, and leave the starter profile on **Auto**.
-
-The card suggests compatible, live insights from Home Assistant's area metadata. Rearrange, remove, duplicate, or swap any insight afterwards.
 
 ```yaml
 type: custom:area-glance-card
 area: living_room
 ```
 
-## Portable showcase
-
-[The maintained showcase stack](examples/showcase.yaml) demonstrates the principal layouts, profiles, and appearance options in one vertical stack. Its `area: 1`, `area: 2`, and `area: 3` entries are portable showcase slots: they resolve to the first, second, and third real areas on the current Home Assistant installation, then use those actual areas for titles, suggestions, and aggregates.
-
-For ordinary dashboard cards, continue to use your normal Home Assistant area ID such as `area: living_room`. A missing showcase slot stays empty; it never falls back to an unrelated room or whole-home aggregate.
-
-If HACS has not added the dashboard resource, add it manually:
+If HACS has not added the resource, add it manually:
 
 ```yaml
 url: /hacsfiles/ha-area-glance-card/area-glance-card.js
 type: module
 ```
 
-## Supported insights
+## What it can show
 
-- **Comfort & air:** temperature, humidity, CO₂, PM2.5, VOC, AQI, weather.
-- **Home activity:** lights, power, battery, motion, presence, people home, doors, windows, blinds, locks, leaks, alarms, and Attention.
-- **Devices & utilities:** media or other chosen devices, robot vacuums, cameras (including full-slot previews), clocks, calendar date, and Custom combinations.
-- **Profiles:** automatic area, Whole home, Energy Dashboard, Home battery, Security, and Cameras (up to three cropped previews, one per camera device).
+- **Areas and home activity:** temperature, humidity, lights, power, motion, presence, people home, doors, windows, blinds, locks, leaks, and alarms.
+- **Air and devices:** CO₂, PM2.5, VOC, AQI, weather, media, robot vacuums, clocks, calendar dates, cameras, and custom combinations.
+- **System profiles:** Whole home, Energy Dashboard, Home battery, Security, and up to three camera previews from separate camera devices.
+- **Chart history:** single or multi-series line/area history, columns, and daily totals from a recorded entity or compatible Energy Dashboard source.
 
-## Smart defaults, room by room
+Matching favours Home Assistant domains, device classes, units, and Energy Dashboard configuration rather than loose entity-name matching.
 
-For areas, automatic suggestions include temperature, humidity, lights, live power, CO₂, PM2.5, VOC, AQI, motion, presence, doors, windows, blinds, locks, leaks, and Attention (unavailable entities or updates). Matching favours Home Assistant domains, device classes, and units—not loose entity-name matching.
+## Layouts and charts
 
-You can also start with **Whole home**, **Energy**, **Home battery**, **Security**, or **Cameras**. The Cameras profile selects up to three cropped previews—one per device where possible—without affecting neighbouring insight widths.
+Choose a compact band, title-above layout, insight-only card, or a one-column Insight tower. Cards resize their visible insights automatically.
 
-With no area selected, **Energy** reads the live grid, solar, battery flow, and battery charge sources configured in Home Assistant's Energy Dashboard—never guessed from entity names. If Energy Dashboard is not configured, replace those slots with your own entity insights. Security is deliberately conservative: it reports the monitored alarm, doors, windows, and locks without claiming coverage the card cannot verify.
+![Whole-home summary band](docs/screenshots/house-profile.png)
 
-Dedicated entity-led insights are available for:
+![One-column insight tower](docs/screenshots/insight-tower.png)
 
-- Weather with a live condition icon and a selected reading.
-- Robot vacuums with state, battery, or fan-speed display.
-- Digital or analogue clocks and a calendar-date tile.
-- A Custom combination: main value, optional supporting value, icon source, and state-based colours.
+Chart cards keep one live summary alongside a deliberately restrained plot.
 
-```yaml
-# A deliberate group, independent of Home Assistant area membership
-type: custom:area-glance-card
-title: Air quality
-metrics:
-  - preset: custom
-    entity: sensor.office_co2
-    label_mode: entity
-```
+![Solar generation chart](docs/screenshots/solar-chart.png)
 
-## Details when you need them
+![Daily gas totals chart](docs/screenshots/daily-totals-chart.png)
 
-Area aggregates include compatible new devices automatically. Use **Exclude entities from this area** to remove noise such as an always-on LED, while future compatible devices continue to be included. Use **Selected entities** when you want a deliberate cross-area group instead.
-
-Tap an aggregate to inspect exactly which entities contribute. Light aggregates include individual and all-lights toggles; numeric temperature and power aggregates show useful summary statistics. The same aggregate membership controls are available for area-based header statuses.
+![Multi-series temperature chart](docs/screenshots/multi-line-chart.png)
 
 ## Make it yours
 
-Choose **Title beside insights** (the compact band), **Title above insights**, **Insight tower**, or **Insights only**. Stacked headers can align left, centre, or right. Cards resize their visible insights automatically.
+Rearrange, duplicate, remove, or swap insights in the editor. Each area aggregate can automatically include new compatible devices; exclude an outlier while retaining that automatic discovery, or choose a precise group of entities instead.
 
-Appearance controls cover height, theme-aware colour style, background, shadow, optional area icon, shared text weight (bold, regular, or light), and card-wide title, status, value, and label size adjustments.
+Tap an aggregate to inspect its contributors. Lights offer individual and all-lights toggles; temperature and power show summary statistics. Energy and battery cards reveal the configured Energy Dashboard sources that drive each metric.
 
-Every header and insight supports Home Assistant tap, hold, and double-tap actions. Fine tuning includes aggregation choice, threshold colours, label source, decimal precision, unit display/override, icon and label visibility, and power-direction inversion.
+Appearance controls include height, background, raised or inset shadow, optional area icon, card-wide text sizing and weight, and default insight icon treatment. Individual insights can still override their own colour, label, icon, unit, decimals, aggregation, and actions.
 
-![Automatic Living-area summary](docs/screenshots/living.png)
+## Portable showcase
 
-![Energy Dashboard summary](docs/screenshots/energy.png)
+[The maintained showcase stack](examples/showcase.yaml) demonstrates the main profiles, layouts, and appearance options. Its `area: 1`, `area: 2`, and `area: 3` values are portable showcase slots: they resolve to the first, second, and third real areas in the current Home Assistant instance, then use those actual areas for titles, suggestions, and aggregates.
+
+For normal dashboard cards, use the regular area ID such as `area: living_room`. A missing showcase slot stays empty; it never falls back to an unrelated room or whole-home aggregate.
 
 ## Troubleshooting
 
-Assign devices or entities to an area in Home Assistant for room-level suggestions. Leave the area blank for a whole-home aggregate, then use **Exclude entities from this home** to remove an outlier.
+For room-level suggestions, assign devices or entities to an area in Home Assistant. If an expected device is missing, check its area assignment and device class or unit, then use **A specific entity** or **Selected entities** for intentional exceptions.
 
-If an expected device is missing, check its area assignment and device class/unit first. Choose **A specific entity** or **Selected entities** when it is intentionally exceptional. The contributor sheet is the quickest way to see what an aggregate currently includes.
+Leave the area empty for whole-home aggregates. Energy without an area uses configured Energy Dashboard sources; it does not guess from entity names. Security reports only the monitored entities it can identify and does not claim complete home coverage.
 
 ## Development
 
-Run `npm install`, `npm run check`, then `npm run build`. Commit the generated [area-glance-card.js](area-glance-card.js) with source changes. See [architecture notes](docs/architecture.md) before extending automatic matching or actions.
+Run `npm install`, `npm run check`, then `npm run build`. Commit the generated [area-glance-card.js](area-glance-card.js) with source changes. See the [architecture notes](docs/architecture.md) before extending automatic matching or actions.
