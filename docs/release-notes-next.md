@@ -36,6 +36,9 @@
 
 - The Cameras profile now discovers feeds after Home Assistant has supplied
   live state, avoiding a blank placeholder on a fresh dashboard load.
+- Portable numeric area slots now receive the same initial, area-aware
+  suggestions as a newly chosen area in the visual editor, while any metrics
+  explicitly written in YAML remain untouched.
 - Chart history loading now avoids replacing a valid Energy Dashboard source with a temporary generic suggestion while configuration is still loading.
 - Chart requests are cached by their source and display settings, stale responses are ignored, and live state updates can refresh the visible latest value without a full history reload.
 - Chart geometry follows the final plot size so SVG labels are not distorted as Home Assistant Sections layouts settle.

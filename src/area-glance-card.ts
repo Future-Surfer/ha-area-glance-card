@@ -537,6 +537,10 @@ export class AreaGlanceCard extends LitElement {
   private _metricGesture?: { pointerId: number; metric: MetricConfig; display: MetricDisplay; startX: number; startY: number; held: boolean; timer?: number };
   private _pendingMetricTap?: { metric: MetricConfig; display: MetricDisplay; timer: number };
   private _ignoreMetricClick = false;
+  /** Numeric showcase slots have no fixed room definition, so their initial
+   * suggestions wait until HA has supplied the resolved area's live entities. */
+  private _showcaseSuggestionsKey?: string;
+  private _showcaseHasExplicitMetrics = false;
 
   static get properties() {
     return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true }, _towerIconMode: { state: true }, _chartHistory: { state: true }, _multiChartHistory: { state: true }, _chartLoading: { state: true }, _chartPlotWidth: { state: true } };
@@ -554,12 +558,14 @@ export class AreaGlanceCard extends LitElement {
     if (!config || (!config.title && !config.area && !["house", "security", "energy", "battery", "cameras", "chart"].includes(config.profile ?? "") && config.layout !== "metrics-only")) {
       throw new Error("Set a title, choose an area, use a Home, Energy, Home battery, Security, Cameras, or Chart profile, or use Metrics only.");
     }
+    this._showcaseSuggestionsKey = undefined;
+    this._showcaseHasExplicitMetrics = Array.isArray(config.metrics);
     this._config = {
       ...config,
       // Camera candidates depend on live hass.states, which is intentionally
       // assigned after setConfig by Home Assistant. Keep this profile dynamic
       // instead of freezing a blank fallback camera before states arrive.
-      metrics: config.metrics?.length ? config.metrics : config.profile === "cameras" ? undefined : defaultMetricsForProfile(config.profile, this.hass),
+      metrics: this._showcaseHasExplicitMetrics ? config.metrics : (config.profile === "cameras" || typeof config.area === "number") ? undefined : defaultMetricsForProfile(config.profile, this.hass),
     };
     this._loadEnergyPreferences();
     this._ensureChartHistory();
@@ -570,6 +576,64 @@ export class AreaGlanceCard extends LitElement {
     const configured = this._config?.metrics;
     if (configured?.length) return configured;
     return this._config?.profile === "cameras" ? cameraProfileMetrics(this.hass) : configured ?? [];
+  }
+
+  /**
+   * Apply the safe part of the editor's initial area suggestion to portable
+   * numeric slots. It intentionally runs only when the YAML did not provide
+   * its own metrics: `area: 1` should behave like choosing that room for the
+   * first time, while an explicit showcase card stays completely in control.
+   */
+  private _applyShowcaseAreaSuggestions() {
+    const config = this._config;
+    if (!config || typeof config.area !== "number" || this._showcaseHasExplicitMetrics || config.metrics?.length || !this.hass) return;
+    const areaId = this._resolvedArea(config.area);
+    if (!areaId) return;
+    const key = `${config.area}:${areaId}:${Object.keys(this.hass.states).length}`;
+    if (this._showcaseSuggestionsKey === key) return;
+    this._showcaseSuggestionsKey = key;
+
+    const entities = areaEntityIds(this.hass, areaId);
+    const state = (entityId: string) => this.hass?.states[entityId];
+    const first = (predicate: (entityId: string) => boolean) => entities.find(predicate);
+    const hasDeviceClass = (entityId: string, deviceClass: string) => isMeasurementSensor(entityId, state(entityId)) && state(entityId)?.attributes.device_class === deviceClass;
+    const isPower = (entityId: string) => isAreaMeasurement("power", entityId, state(entityId));
+    const name = (this._areaName(config.area) ?? "").toLowerCase();
+    const profile = config.profile === "auto" || !config.profile
+      ? /(garage|utility|plant|battery)/.test(name) ? "battery" : /(energy|solar|power)/.test(name) ? "energy" : /(living|lounge|family|den|media|cinema|tv)/.test(name) ? "media" : "room"
+      : config.profile;
+    const metrics: MetricConfig[] = [];
+    const addEntity = (preset: MetricPreset, entity?: string, overrides: Partial<MetricConfig> = {}) => { if (entity && metrics.length < 5) metrics.push({ ...presetMetric(preset), entity, source: "entity", ...overrides }); };
+    const addArea = (preset: MetricPreset, available: boolean, overrides: Partial<MetricConfig> = {}) => { if (available && metrics.length < 5) metrics.push({ ...presetMetric(preset), source: "area", area: config.area, ...overrides }); };
+    const temperature = first((id) => hasDeviceClass(id, "temperature"));
+    const humidity = first((id) => hasDeviceClass(id, "humidity"));
+    const co2 = first((id) => isAreaMeasurement("co2", id, state(id)));
+    const pm25 = first((id) => isAreaMeasurement("pm25", id, state(id)));
+    const voc = first((id) => isAreaMeasurement("voc", id, state(id)));
+    const aqi = first((id) => isAreaMeasurement("aqi", id, state(id)));
+    const air = ([ ["co2", co2], ["pm25", pm25], ["voc", voc], ["aqi", aqi] ] as const).find(([, entity]) => Boolean(entity))?.[0];
+    const power = first(isPower);
+    const battery = first((id) => hasDeviceClass(id, "battery"));
+    const media = first((id) => id.startsWith("media_player."));
+    const device = media ?? first((id) => id.startsWith("switch.") || id.startsWith("fan.") || id.startsWith("climate."));
+    const blind = first((id) => isBlindEntity(id, state(id)));
+    if (profile === "battery") {
+      addEntity("battery", battery); addEntity("power", power); addArea("temperature", Boolean(temperature));
+    } else if (profile === "energy") {
+      addArea("power", Boolean(power)); addEntity("battery", battery); addArea("temperature", Boolean(temperature));
+    } else if (profile === "media") {
+      addArea("temperature", Boolean(temperature)); addArea("lights", Boolean(first((id) => id.startsWith("light.")))); addEntity("device", media ?? device, { label: media ? "Media" : undefined }); addArea("blinds", Boolean(blind)); addArea("power", Boolean(power)); if (air) addArea(air, true); addArea("humidity", Boolean(humidity));
+    } else {
+      addArea("temperature", Boolean(temperature)); addArea("lights", Boolean(first((id) => id.startsWith("light.")))); addArea("blinds", Boolean(blind)); addArea("humidity", Boolean(humidity)); if (air) addArea(air, true); addArea("power", Boolean(power)); if (!metrics.length) addEntity("device", device);
+    }
+    const motion = first((id) => isSignalEntity("motion", id, state(id)));
+    const presence = first((id) => isSignalEntity("presence", id, state(id)));
+    this._config = {
+      ...config,
+      metrics,
+      title: config.title ?? this._areaName(config.area),
+      status: config.status ?? (presence && (profile === "room" || profile === "media") ? { source: "area_presence", area: config.area } : motion && (profile === "room" || profile === "media") ? { source: "area_motion", area: config.area, active_text: "Motion", inactive_text: "No motion", show_last_changed: true, last_changed_text: "Last motion" } : undefined),
+    };
   }
   private _gridRows() {
     const height = this._heightOption();
@@ -627,6 +691,7 @@ export class AreaGlanceCard extends LitElement {
 
   protected willUpdate(changed: PropertyValues<this>) {
     if (changed.has("hass")) {
+      this._applyShowcaseAreaSuggestions();
       this._loadEnergyPreferences();
       this._ensureChartHistory();
       this.requestUpdate();

@@ -10,13 +10,8 @@ cards:
   - type: custom:area-glance-card
     area: 1
     height: slim
-    # Intentionally limited to the two safest room aggregates. This keeps the
-    # portable example useful in small or sparsely instrumented homes.
-    metrics:
-      - preset: temperature
-        source: area
-      - preset: lights
-        source: area
+    # No metrics are specified deliberately: the numbered area receives the
+    # same initial suggestions it would receive in the visual editor.
 
   - type: custom:area-glance-card
     area: 2
@@ -24,11 +19,6 @@ cards:
     appearance:
       preset: light
       show_area_icon: true
-    metrics:
-      - preset: temperature
-        source: area
-      - preset: lights
-        source: area
 
   - type: custom:area-glance-card
     area: 3
@@ -36,11 +26,6 @@ cards:
     appearance:
       show_insight_icons: false
       insight_icon_color: grey
-    metrics:
-      - preset: temperature
-        source: area
-      - preset: lights
-        source: area
 
   - type: custom:area-glance-card
     profile: house
