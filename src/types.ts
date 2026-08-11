@@ -51,20 +51,58 @@ export interface HassLike {
   callWS?: <T = unknown>(message: Record<string, unknown>) => Promise<T>;
 }
 
-export type ChartType = "line" | "area" | "columns" | "daily_totals";
+export type ChartType = "line" | "area" | "multi_line" | "columns" | "daily_totals";
+
+/** One deliberately named contributor to a multi-line chart. */
+export interface ChartSeriesConfig {
+  entity: string;
+  /** Explicit colour wins over the restrained automatic palette. */
+  color?: string;
+  /** Optional concise legend label; entity friendly name is the default. */
+  label?: string;
+}
 
 /** A deliberately small, single-series chart configuration. */
 export interface ChartConfig {
   type?: ChartType;
+  /** Continuous charts are filled by default; set false for an unfilled line. */
+  show_area?: boolean;
+  /** Optional restrained colours for values above/below zero. Negative values
+   * default to orange so export/negative flow is immediately legible. */
+  positive_color?: string;
+  negative_color?: string;
+  /** Restrained third colour for completed Saturday/Sunday daily-total bars. */
+  weekend_color?: string;
+  /** Primary colour for completed daily-total bars. */
+  daily_primary_color?: string;
+  /** Highlight colour for the incomplete current-day daily-total bar. */
+  today_color?: string;
+  /** @deprecated Chart annotation sizing now lives in appearance.text_scale. */
+  x_axis_font_size?: number;
+  /** @deprecated Chart annotation sizing now lives in appearance.text_scale. */
+  y_axis_font_size?: number;
+  /** @deprecated Chart annotation sizing now lives in appearance.text_scale. */
+  bar_label_font_size?: number;
   /** A directly chosen numeric sensor. */
   entity?: string;
+  /** Up to three compatible direct entities for the multi-line chart. */
+  entities?: ChartSeriesConfig[];
+  /** Shared-axis line overlay or non-negative cumulative areas. */
+  multi_display?: "overlap" | "stacked";
+  /** Entity opened by a normal chart tap; defaults to the first series. */
+  primary_entity?: string;
   /** A source explicitly configured in Home Assistant's Energy Dashboard. */
   energy_source?: "grid" | "solar" | "battery_soc" | "battery_power";
   /** Short ranges use Recorder history; longer ranges favour statistics. */
   range?: "6h" | "24h" | "48h" | "7d" | "14d" | "30d";
+  /** Arbitrary history window in hours. Takes precedence over the legacy range presets. */
+  hours_to_show?: number;
   history_source?: "auto" | "raw" | "statistics";
   /** Statistic used when bucketing a Columns chart. */
   bucket_statistic?: "mean" | "last" | "max" | "min";
+  /** Optional fixed plotted-value axis limits. Leave blank for automatic bounds. */
+  axis_min?: number;
+  axis_max?: number;
   decimals?: number;
   unit?: string;
   title?: string;
@@ -190,9 +228,23 @@ export interface AreaGlanceConfig extends ActionConfig {
     style?: "bold" | "light";
     /** Show an inferred area/profile icon in the header. Disabled by default. */
     show_area_icon?: boolean;
+    /** Hide ordinary insight icons for a quieter, value-led presentation. */
+    show_insight_icons?: boolean;
+    /**
+     * Shared fallback treatment for insight icons. Explicit per-insight colours
+     * (including threshold and state rules) continue to take priority.
+     */
+    insight_icon_color?: "default" | "black" | "grey";
     /** Optional MDI override for the Light-style header icon. */
     area_icon?: string;
     background?: string;
+    /** Controls whether the card is raised, sunken, or has no shadow. */
+    shadow_style?: "drop" | "inner" | "none";
+    /** Shadow darkness as a percentage. Defaults to the existing 18% shadow. */
+    shadow_opacity?: number;
+    /** CSS shadow spread in pixels. */
+    shadow_spread?: number;
+    /** @deprecated Replaced by shadow_style. Retained so existing card YAML keeps its appearance. */
     shadow?: boolean;
     /** Global percentage adjustments, deliberately shared by every insight. */
     text_scale?: {
@@ -200,6 +252,10 @@ export interface AreaGlanceConfig extends ActionConfig {
       status?: number;
       value?: number;
       label?: number;
+      /** Chart-only annotation scales, shown alongside the standard typography controls. */
+      chart_x_axis?: number;
+      chart_y_axis?: number;
+      chart_bar_labels?: number;
     };
   };
   theme?: "auto" | "light" | "dark";

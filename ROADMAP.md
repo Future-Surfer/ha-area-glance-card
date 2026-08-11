@@ -64,6 +64,22 @@ Camera previews can be used individually or via the Cameras profile, which selec
 - Define clear data requirements and graceful fallbacks when Recorder/history is unavailable; no guessed history and no heavy per-card polling.
 - Reuse Home Assistant’s own history/statistics APIs and formatting conventions where possible.
 
+### Multi-entity chart aggregation
+
+**Status:** Deferred until the dedicated multi-line chart has established the shared entity-selection, unit-compatibility, caching, and history-loading infrastructure.
+
+**Goal:** Let a chart show one honest combined series from a small, explicitly selected set of compatible entities.
+
+- Add an advanced **Show as** choice to a future multi-entity chart: separate lines or one combined value.
+- Support only clear operations: mean, minimum, maximum, sum, and (if testing proves it worthwhile) median.
+- Offer meaningful defaults without silently changing the result: mean for environmental readings, sum for compatible power readings, and require an explicit choice when the semantics are ambiguous.
+- Require compatible measurement dimensions and display units. Never combine temperature with power, or unrelated concentration units.
+- Align histories onto a shared time grid using a documented last-known-value rule, with a staleness limit so an old sensor cannot be presented as a current contributor.
+- Make contributor membership inspectable and reuse the existing selected-entity and exclusion controls rather than creating a second membership model.
+- Keep the first version deliberately small: direct selected entities only, one shared value axis, no area-history aggregation, no multi-axis charts, and no fabricated totals from live power readings.
+
+**Done when:** a user can deliberately select several compatible sensors, choose a transparent aggregation, inspect contributors, and trust that gaps or stale readings are never hidden by the chart.
+
 ### Thermostat and climate support
 
 **Goal:** Turn the existing generic Climate device display into a purposeful thermostat insight without guessing how a household controls heating.
