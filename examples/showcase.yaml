@@ -10,6 +10,13 @@ cards:
   - type: custom:area-glance-card
     area: 1
     height: slim
+    # Intentionally limited to the two safest room aggregates. This keeps the
+    # portable example useful in small or sparsely instrumented homes.
+    metrics:
+      - preset: temperature
+        source: area
+      - preset: lights
+        source: area
 
   - type: custom:area-glance-card
     area: 2
@@ -17,6 +24,11 @@ cards:
     appearance:
       preset: light
       show_area_icon: true
+    metrics:
+      - preset: temperature
+        source: area
+      - preset: lights
+        source: area
 
   - type: custom:area-glance-card
     area: 3
@@ -24,6 +36,11 @@ cards:
     appearance:
       show_insight_icons: false
       insight_icon_color: grey
+    metrics:
+      - preset: temperature
+        source: area
+      - preset: lights
+        source: area
 
   - type: custom:area-glance-card
     profile: house
@@ -41,9 +58,6 @@ cards:
     profile: cameras
     title: Cameras
 
-  - type: custom:area-glance-card
-    profile: chart
-    chart:
-      type: line
-      entity: sensor.outdoor_temperature
-      hours_to_show: 24
+  # Charts need a real history source. Add a separate chart card in the editor
+  # (or choose an entity that exists in your own installation) rather than
+  # putting a made-up entity ID in this portable stack.

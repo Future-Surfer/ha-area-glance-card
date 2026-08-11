@@ -556,19 +556,27 @@ export class AreaGlanceCard extends LitElement {
     }
     this._config = {
       ...config,
-      metrics: config.metrics?.length ? config.metrics : defaultMetricsForProfile(config.profile, this.hass),
+      // Camera candidates depend on live hass.states, which is intentionally
+      // assigned after setConfig by Home Assistant. Keep this profile dynamic
+      // instead of freezing a blank fallback camera before states arrive.
+      metrics: config.metrics?.length ? config.metrics : config.profile === "cameras" ? undefined : defaultMetricsForProfile(config.profile, this.hass),
     };
     this._loadEnergyPreferences();
     this._ensureChartHistory();
   }
 
   private _heightOption() { return HEIGHT_OPTIONS[this._config?.height ?? "slim"]; }
+  private _effectiveMetrics(): MetricConfig[] {
+    const configured = this._config?.metrics;
+    if (configured?.length) return configured;
+    return this._config?.profile === "cameras" ? cameraProfileMetrics(this.hass) : configured ?? [];
+  }
   private _gridRows() {
     const height = this._heightOption();
     // Charts deliberately occupy roughly two bands, while remaining honest to
     // the shared card-height choice used by every other layout.
     if (this._config?.profile === "chart") return height.rows * (this._config.layout === "stacked" ? 2.45 : 2);
-    if (this._config?.layout === "tower") return Math.max(3.5, 1.2 + (this._config?.metrics?.filter((metric) => !metric.hidden).length ?? 1) * 1.15);
+    if (this._config?.layout === "tower") return Math.max(3.5, 1.2 + (this._effectiveMetrics().filter((metric) => !metric.hidden).length || 1) * 1.15);
     return this._config?.layout === "stacked" ? height.stackedRows : height.rows;
   }
 
@@ -1414,7 +1422,11 @@ export class AreaGlanceCard extends LitElement {
     // authentication or depending on internal UI components.
     const separator = picture.includes("?") ? "&" : "?";
     const refreshKey = Math.floor(Date.now() / 30000);
-    return { icon, color, value: "", label, showIcon: false, showLabel: false, visual: { kind: "camera", src: `${picture}${separator}area_glance=${refreshKey}`, alt: label || entityId } };
+    // Home Assistant serves normal camera images through a proxy URL, while
+    // Card Lab (and some integrations) can provide a complete data URI. A
+    // query string is useful for the former but corrupts the latter.
+    const source = picture.startsWith("data:") ? picture : `${picture}${separator}area_glance=${refreshKey}`;
+    return { icon, color, value: "", label, showIcon: false, showLabel: false, visual: { kind: "camera", src: source, alt: label || entityId } };
   }
 
   private _metric(metric: MetricConfig): MetricDisplay | undefined {
@@ -2095,7 +2107,7 @@ export class AreaGlanceCard extends LitElement {
       </ha-card>${this._renderChartContributorSheet()}`;
     }
     const status = this._status();
-    const metrics = (this._config.metrics ?? []).map((metric) => ({ metric, display: this._metric(metric) })).filter((entry): entry is { metric: MetricConfig; display: MetricDisplay } => Boolean(entry.display));
+    const metrics = this._effectiveMetrics().map((metric) => ({ metric, display: this._metric(metric) })).filter((entry): entry is { metric: MetricConfig; display: MetricDisplay } => Boolean(entry.display));
     const title = this._config.title
       ?? (this._config.profile === "house" ? "House" : this._config.profile === "security" ? "Security" : this._config.profile === "energy" ? "Energy" : this._config.profile === "battery" ? "Home battery" : this._config.profile === "cameras" ? "Cameras" : this._areaName(this._config.area))
       ?? "Area";
