@@ -18,6 +18,7 @@
 - Signed line and column charts reserve orange for values below zero / export by default. Daily totals highlight the incomplete current day in orange and use a darker weekend tone.
 - Daily-total charts can show compact per-day values when space allows, with responsive weekday/date labels.
 - Chart headers reuse Area Glance title fitting and can sit beside or above the plot, matching the card's existing layout and typography model.
+- Tapping a multi-line chart now opens the familiar contributor sheet, listing the entities represented by its lines.
 
 ## Appearance and polish
 

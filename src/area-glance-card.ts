@@ -851,8 +851,26 @@ export class AreaGlanceCard extends LitElement {
     })}</span>`;
   }
 
+  /** A multi-line chart is an aggregate: its natural tap target is the same
+   * contributor list used by the area-based insight aggregates. */
+  private _openMultiChartDetails() {
+    const entities = this._chartSeries().map((series) => series.entity);
+    this._detail = {
+      title: this._chartTitle(),
+      subtitle: "Contributing chart entities",
+      entities,
+      emptyMessage: "No entities are currently contributing to this chart.",
+      aggregatePanel: true,
+      summary: `${entities.length} included`,
+    };
+  }
+
   private _chartClicked(event: Event) {
     event.stopPropagation();
+    if (this._config?.chart?.type === "multi_line") {
+      this._openMultiChartDetails();
+      return;
+    }
     const source = this._chartSource();
     this._runAction(this._config, source.entity ?? source.importEntity);
   }
@@ -1998,6 +2016,24 @@ export class AreaGlanceCard extends LitElement {
     if (!this._detail && dialog?.open) dialog.close();
   }
 
+  /** Chart has its own early render branch, so it must also render the shared
+   * contributor-sheet structure for a multi-line chart to be able to open it. */
+  private _renderChartContributorSheet() {
+    const detail = this._detail;
+    return html`<dialog class="detail-sheet ${detail?.aggregatePanel ? "aggregate-sheet" : ""}${(detail?.entities.length ?? 0) > 4 ? " scrollable-sheet" : ""}" @close=${this._closeDetail} @click=${(event: Event) => { if (event.target === event.currentTarget) this._closeDetail(); }}>
+      ${detail ? html`<div class="detail-content ${detail.aggregatePanel ? "aggregate-panel" : ""}">
+        <div class="detail-heading"><div><h2>${detail.title}</h2><p>${detail.subtitle}</p></div><button class="detail-close" aria-label="Close" @click=${this._closeDetail}>×</button></div>
+        ${detail.summary ? html`<div class="detail-count generic">${detail.summary}</div>` : nothing}
+        ${detail.entities.length ? html`<div class="detail-entities">${detail.entities.map((entityId) => {
+          const name = this._entityName(entityId);
+          const state = this._detailEntityState(entityId);
+          const tone = this._detailEntityTone(entityId);
+          return html`<div class="detail-entity detail-aggregate-entity"><span class="detail-icon-badge ${tone}"><ha-icon icon=${this._detailEntityIcon(entityId)}></ha-icon></span><button class="detail-entity-main" aria-label=${`${name}: ${state}. Show details`} @click=${() => this._openEntityDetails(entityId)}><span><strong>${name}</strong><small>${this._detailEntityDescription(entityId)}</small></span><span class="detail-state">${state}</span></button></div>`;
+        })}</div>` : html`<p class="detail-empty">${detail.emptyMessage}</p>`}
+      </div>` : nothing}
+    </dialog>`;
+  }
+
   protected render() {
     if (!this._config) return nothing;
     if (this._config.profile === "chart") {
@@ -2015,7 +2051,7 @@ export class AreaGlanceCard extends LitElement {
       const multiChart = this._config.chart?.type === "multi_line";
       return html`<ha-card class=${`chart-card ${this._config.theme === "dark" ? "force-dark" : this._config.theme === "light" ? "force-light" : ""}${textWeight !== "bold" ? ` ${textWeight}-weight` : ""}${shadowMode === "none" ? " no-shadow" : shadowMode === "inner" ? " inner-shadow" : ""}`} style=${`--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);${background ? `--area-glance-card-background:${background}` : ""}${this._shadowStyle()}${this._layoutStyle(0)}`}>
         <section class=${`chart-layout${chartStacked ? " stacked" : ""}${multiChart ? " multi-chart-layout" : ""}`}><div class=${`chart-summary summary align-${chartHeaderAlignment}`} style=${`--area-glance-title-fit:${titleFit}`}><span class=${`title ${titleLines}`}>${chartTitle}</span>${multiChart && !explicitStatus?.line ? this._renderMultiLegend() : html`<span class="chart-value">${explicitStatus?.line ?? this._chartSummary(history)}</span>`}<span class="chart-range">${explicitStatus?.age ?? this._chartRangeLabel()}</span></div><button class="chart-plot" aria-label=${`Open ${chartTitle} details`} @click=${this._chartClicked}>${this._renderChart()}</button></section>
-      </ha-card>`;
+      </ha-card>${this._renderChartContributorSheet()}`;
     }
     const status = this._status();
     const metrics = (this._config.metrics ?? []).map((metric) => ({ metric, display: this._metric(metric) })).filter((entry): entry is { metric: MetricConfig; display: MetricDisplay } => Boolean(entry.display));
