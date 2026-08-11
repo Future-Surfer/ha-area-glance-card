@@ -19,13 +19,29 @@ cards:
     appearance:
       preset: light
       show_area_icon: true
-
-  - type: custom:area-glance-card
-    area: 3
-    layout: tower
-    appearance:
-      show_insight_icons: false
+      shadow_style: inner
       insight_icon_color: grey
+
+  # A grid keeps the tower at a compact half-width alongside another
+  # full-height card. Tower icons are intentionally left enabled.
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: custom:area-glance-card
+        area: 3
+        layout: tower
+
+      # Charts use an Energy Dashboard source so this stays portable. Select a
+      # direct entity in the visual editor instead if Solar is not configured.
+      - type: custom:area-glance-card
+        profile: chart
+        layout: stacked
+        chart:
+          type: line
+          energy_source: solar
+          title: Solar
+          hours_to_show: 24
 
   - type: custom:area-glance-card
     profile: house
@@ -43,6 +59,5 @@ cards:
     profile: cameras
     title: Cameras
 
-  # Charts need a real history source. Add a separate chart card in the editor
-  # (or choose an entity that exists in your own installation) rather than
-  # putting a made-up entity ID in this portable stack.
+  # If Solar is not configured in your Energy Dashboard, open the chart in the
+  # visual editor and select any recorded numeric entity instead.

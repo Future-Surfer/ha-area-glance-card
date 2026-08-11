@@ -36,6 +36,9 @@
 
 - The Cameras profile now discovers feeds after Home Assistant has supplied
   live state, avoiding a blank placeholder on a fresh dashboard load.
+- The Cameras profile now selects up to three distinct camera devices. It
+  avoids duplicate Clear/Fluent and main/sub-stream variants, preferring the
+  lighter stream where a single physical camera publishes more than one feed.
 - Portable numeric area slots now receive the same initial, area-aware
   suggestions as a newly chosen area in the visual editor, while any metrics
   explicitly written in YAML remain untouched.

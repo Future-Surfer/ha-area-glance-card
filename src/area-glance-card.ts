@@ -23,7 +23,24 @@ const DEFAULT_BATTERY_METRICS: MetricConfig[] = [
   { ...presetMetric("power"), energy_source: "solar", label: "Solar", icon: "mdi:solar-power-variant" },
   { ...presetMetric("power"), energy_source: "grid", label: "Grid", icon: "mdi:transmission-tower" },
 ];
-/** Select a compact, non-duplicated set of camera feeds for the Cameras profile. */
+/**
+ * A few integrations expose one physical camera as Clear/Fluent, Main/Sub or
+ * HD/low camera entities. The entity registry device ID is authoritative; this
+ * conservative stem is only a fallback for frontends that have not exposed it.
+ */
+const cameraDeviceFallback = (entityId: string, attributes: Record<string, unknown>) => {
+  const explicit = attributes.device_id;
+  if (typeof explicit === "string" && explicit) return `device:${explicit}`;
+  const stem = entityId.replace(/^camera\./, "").replace(/(?:[_-](?:clear|fluent|main(?:stream)?|sub(?:stream)?|high|low|hd|sd|live|stream\d*))$/i, "");
+  return `camera:${stem}`;
+};
+const cameraStreamRank = (entityId: string, attributes: Record<string, unknown>) => {
+  const value = `${entityId} ${attributes.friendly_name ?? ""}`.toLowerCase();
+  if (/(fluent|sub(?:stream)?|low|sd)/.test(value)) return 0;
+  if (/(clear|main(?:stream)?|high|hd)/.test(value)) return 2;
+  return 1;
+};
+/** Select up to three feeds, never more than one from each physical camera. */
 const cameraProfileMetrics = (hass?: HassLike): MetricConfig[] => {
   const cameras = Object.keys(hass?.states ?? {})
     .filter((entityId) => entityId.startsWith("camera."))
@@ -33,10 +50,10 @@ const cameraProfileMetrics = (hass?: HassLike): MetricConfig[] => {
       const height = Number(attributes.height ?? attributes.image_height ?? 0);
       const resolution = typeof attributes.resolution === "string" ? attributes.resolution.match(/(\d+)\s*[x×]\s*(\d+)/i) : undefined;
       const pixels = width > 0 && height > 0 ? width * height : resolution ? Number(resolution[1]) * Number(resolution[2]) : Number.POSITIVE_INFINITY;
-      const deviceId = hass?.entities?.[entityId]?.device_id ?? `entity:${entityId}`;
-      return { entityId, deviceId, pixels };
+      const deviceId = hass?.entities?.[entityId]?.device_id ?? cameraDeviceFallback(entityId, attributes);
+      return { entityId, deviceId, pixels, streamRank: cameraStreamRank(entityId, attributes) };
     })
-    .sort((a, b) => a.pixels - b.pixels || a.entityId.localeCompare(b.entityId));
+    .sort((a, b) => a.pixels - b.pixels || a.streamRank - b.streamRank || a.entityId.localeCompare(b.entityId));
   const seenDevices = new Set<string>();
   return cameras.filter((camera) => {
     if (seenDevices.has(camera.deviceId)) return false;
