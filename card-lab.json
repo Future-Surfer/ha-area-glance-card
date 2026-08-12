@@ -23,6 +23,13 @@
       "yaml": "type: custom:area-glance-card\nprofile: chart\nchart:\n  type: line\n  entity: sensor.living_room_temperature\n  range: 24h\n",
       "theme": "light",
       "layout": { "mode": "sections", "columns": 4, "cardSpan": 4, "columnWidth": 180, "gap": 12 }
+    },
+    {
+      "id": "appearance-style-audit",
+      "name": "Appearance style audit",
+      "yaml": "type: vertical-stack\ncards:\n  - type: custom:area-glance-card\n    title: Light\n    area: living_room\n    appearance:\n      preset: light\n    metrics:\n      - preset: temperature\n      - preset: lights\n      - preset: power\n  - type: custom:area-glance-card\n    title: Slate\n    area: living_room\n    appearance:\n      preset: slate\n    metrics:\n      - preset: temperature\n      - preset: lights\n      - preset: power\n  - type: custom:area-glance-card\n    title: Dark\n    area: living_room\n    appearance:\n      preset: charcoal\n    metrics:\n      - preset: temperature\n      - preset: lights\n      - preset: power\n  - type: custom:area-glance-card\n    profile: chart\n    appearance:\n      preset: slate\n    chart:\n      type: line\n      entity: sensor.living_room_temperature\n      title: Slate chart\n",
+      "theme": "light",
+      "layout": { "mode": "sections", "columns": 4, "cardSpan": 4, "columnWidth": 180, "gap": 12 }
     }
   ]
 }

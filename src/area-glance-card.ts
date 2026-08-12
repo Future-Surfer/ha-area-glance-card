@@ -130,6 +130,8 @@ const APPEARANCE_PRESETS = {
   slate: { theme: "dark", background: "#8d97a3" },
   charcoal: { theme: "dark", background: "#353c45" },
 } as const;
+type AppearancePreset = keyof typeof APPEARANCE_PRESETS | "custom";
+const DEFAULT_CUSTOM_BACKGROUND = "#353c45";
 
 const WEATHER_ICONS: Record<string, string> = {
   "clear-night": "mdi:weather-night",
@@ -929,6 +931,25 @@ export class AreaGlanceCard extends LitElement {
     return hours >= 48 && hours % 24 === 0 ? `${hours / 24}d` : `${hours}h`;
   }
 
+  /** The daily reference uses exactly the bars the reader can see, including
+   * today's in-progress total. It is deliberately not a rolling average. */
+  private _dailyAverage(history: ChartHistory): number | undefined {
+    if (this._config?.chart?.type !== "daily_totals" || !history.points.length) return undefined;
+    return history.points.reduce((sum, point) => sum + point.value, 0) / history.points.length;
+  }
+
+  private _chartHeaderRange(history: ChartHistory): string {
+    const chart = this._config?.chart ?? {};
+    const range = this._chartRangeLabel(chart);
+    if (chart.type !== "daily_totals" || chart.daily_average !== true || chart.daily_average_header === false) return range;
+    const average = this._dailyAverage(history);
+    if (average === undefined) return range;
+    const unit = chart.unit ?? history.unit ?? "";
+    const decimals = chart.decimals ?? (unit === "W" || unit === "%" ? 0 : 1);
+    const formatted = average.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals });
+    return `${range} · AVG ${formatted}${unit ? ` ${unit}` : ""}`;
+  }
+
   private _renderMultiLegend() {
     const chart = this._config?.chart ?? {};
     const histories = this._multiChartLiveHistories();
@@ -1134,9 +1155,18 @@ export class AreaGlanceCard extends LitElement {
         return x > 0 && x < plotWidth ? [x] : [];
       })
       : [];
+    const dailyAverage = type === "daily_totals" && chart.daily_average === true && geometry.points.length
+      ? geometry.points.reduce((sum, point) => sum + point.value, 0) / geometry.points.length
+      : undefined;
+    const dailyAverageY = dailyAverage === undefined
+      ? undefined
+      : Math.max(0, Math.min(plotHeight, plotHeight - ((dailyAverage - geometry.min) / (geometry.max - geometry.min)) * plotHeight));
+    const dailyAverageStyle = chart.daily_average_style ?? "dashed";
+    const dailyAverageThickness = Math.max(1, Math.min(4, Number(chart.daily_average_thickness ?? 1)));
     const positiveClip = `${this._chartSvgId}-positive`;
     const negativeClip = `${this._chartSvgId}-negative`;
-    const chartColours = `--area-glance-chart-positive:${chart.positive_color ?? "var(--primary-text-color)"};--area-glance-chart-negative:${chart.negative_color ?? "var(--orange-color, #e85d20)"};--area-glance-chart-daily-primary:${chart.daily_primary_color ?? "color-mix(in srgb, var(--primary-text-color) 62%, transparent)"};--area-glance-chart-weekend:${chart.weekend_color ?? "color-mix(in srgb, var(--primary-text-color) 76%, transparent)"};--area-glance-chart-today:${chart.today_color ?? "var(--orange-color, #e85d20)"};`;
+    const barOpacity = Math.max(20, Math.min(100, Number(chart.bar_opacity ?? 100)));
+    const chartColours = `--area-glance-chart-positive:${chart.positive_color ?? "var(--primary-text-color)"};--area-glance-chart-negative:${chart.negative_color ?? "var(--orange-color, #e85d20)"};--area-glance-chart-daily-primary:${chart.daily_primary_color ?? "#6b7280"};--area-glance-chart-weekend:${chart.weekend_color ?? "#4f555b"};--area-glance-chart-today:${chart.today_color ?? "var(--orange-color, #e85d20)"};--area-glance-chart-average:${chart.daily_average_color ?? "var(--primary-color)"};--area-glance-chart-average-width:${dailyAverageThickness}px;--area-glance-chart-bar-opacity:${barOpacity / 100};`;
     const continuousShape = filled
       ? svg`<path class="chart-area positive" clip-path=${`url(#${positiveClip})`} d=${geometry.areaPath}></path><path class="chart-area negative" clip-path=${`url(#${negativeClip})`} d=${geometry.areaPath}></path><path class="chart-line positive" clip-path=${`url(#${positiveClip})`} d=${geometry.path}></path><path class="chart-line negative" clip-path=${`url(#${negativeClip})`} d=${geometry.path}></path>`
       : svg`<path class="chart-line positive" clip-path=${`url(#${positiveClip})`} d=${geometry.path}></path><path class="chart-line negative" clip-path=${`url(#${negativeClip})`} d=${geometry.path}></path>`;
@@ -1147,6 +1177,8 @@ export class AreaGlanceCard extends LitElement {
       ${showDailyHorizontalGrid ? scaleTicks.slice(0, -1).map((tick) => svg`<line class="chart-grid" x1="0" y1=${Math.max(0, tick.y - (tick.y === 5 ? 5 : 4))} x2=${plotWidth} y2=${Math.max(0, tick.y - (tick.y === 5 ? 5 : 4))}></line>`) : nothing}
       ${showVerticalGrid ? timeTicks.filter((tick) => tick.x > 0 && tick.x < plotWidth).map((tick) => svg`<line class="chart-grid" x1=${tick.x} y1="0" x2=${tick.x} y2=${plotHeight}></line>`) : nothing}
       ${dailyWeekDividers.map((x) => svg`<line class="chart-grid chart-week-divider" x1=${x} y1="0" x2=${x} y2=${plotHeight}></line>`)}
+      <!-- The average is a continuous background reference; foreground text has its own small halo. -->
+      ${dailyAverageY === undefined ? nothing : svg`<line class=${`chart-average-line ${dailyAverageStyle}`} x1="0" y1=${dailyAverageY} x2=${plotWidth} y2=${dailyAverageY}></line>`}
       <line class="chart-axis chart-y-axis" x1="0" y1="0" x2="0" y2=${plotHeight}></line><line class="chart-axis" x1="0" y1=${plotHeight} x2=${plotWidth} y2=${plotHeight}></line>
       ${(filled || type === "columns" || type === "daily_totals" || geometry.min < 0) ? svg`<line class="chart-zero" x1="0" y1=${geometry.baseline} x2=${plotWidth} y2=${geometry.baseline}></line>` : nothing}
       ${type === "columns" || type === "daily_totals" ? geometry.bars.map((bar, index) => {
@@ -1701,12 +1733,62 @@ export class AreaGlanceCard extends LitElement {
     const appearance = this._config?.appearance;
     const opacity = Math.max(0, Math.min(60, Number(appearance?.shadow_opacity ?? 18)));
     const spread = Math.max(-12, Math.min(16, Number(appearance?.shadow_spread ?? 0)));
-    return `--area-glance-shadow-opacity:${opacity / 100};--area-glance-shadow-spread:${spread}px;`;
+    const x = Math.max(-16, Math.min(16, Number(appearance?.shadow_x ?? 0)));
+    const y = Math.max(-16, Math.min(16, Number(appearance?.shadow_y ?? 8)));
+    const configuredColor = appearance?.shadow_color;
+    // A colour input produces #RRGGBB. Retain a conservative black fallback
+    // when YAML contains an invalid value rather than interpolating arbitrary CSS.
+    const color = typeof configuredColor === "string" && /^#[0-9a-f]{6}$/i.test(configuredColor)
+      ? configuredColor
+      : "#000000";
+    return `--area-glance-shadow-opacity:${opacity}%;--area-glance-shadow-spread:${spread}px;--area-glance-shadow-x:${x}px;--area-glance-shadow-y:${y}px;--area-glance-shadow-color:${color};`;
   }
 
   private _shadowMode() {
     const appearance = this._config?.appearance;
     return appearance?.shadow_style ?? (appearance?.shadow === false ? "none" : "drop");
+  }
+
+  /**
+   * Keep the named appearance preset as the source of truth at render time.
+   * The editor also writes legacy top-level theme/background values for older
+   * YAML consumers, but a saved/restored config is not guaranteed to include
+   * those derived fields. Resolving them here gives every profile — including
+   * the dedicated Chart renderer — the same reliable colour-style behaviour.
+   */
+  private _appearanceSurface() {
+    const appearance = this._config?.appearance;
+    const preset = appearance?.preset as AppearancePreset | undefined;
+    // A named preset is authoritative. Earlier editor versions wrote its
+    // derived theme/background beside the preset, which meant a stale custom
+    // background could silently override a newly chosen named style.
+    if (preset && preset !== "custom") return APPEARANCE_PRESETS[preset];
+    if (preset === "custom") return {
+      theme: this._config?.theme === "light" ? "light" : "dark",
+      background: appearance?.background ?? this._config?.background ?? DEFAULT_CUSTOM_BACKGROUND,
+    };
+    // Configs created before appearance.preset remain fully supported.
+    return {
+      theme: this._config?.theme ?? "auto",
+      background: this._config?.background,
+    };
+  }
+
+  private _appearanceStyle(background?: string) {
+    // ha-card owns its surface inside its own shadow root. Supplying the
+    // standard HA variable is therefore essential: setting `background` on
+    // the outer custom element alone loses to ha-card's internal stylesheet.
+    const configuredRadius = this._config?.appearance?.corner_radius;
+    const radius = Number.isFinite(configuredRadius)
+      ? Math.max(0, Math.min(48, Number(configuredRadius)))
+      : undefined;
+    // Keep the existing responsive defaults (24px normally, 22px on narrow
+    // screens) when no value is saved. A configured value deliberately wins
+    // in every profile and layout, including charts and camera cards.
+    const radiusStyle = radius === undefined
+      ? "--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);"
+      : `--area-glance-card-border-radius:${radius}px;--ha-card-border-radius:${radius}px;`;
+    return `${radiusStyle}${background ? `--ha-card-background:${background};--area-glance-card-background:${background};` : ""}`;
   }
 
   private _textFit(text: string, type: "value" | "label"): number {
@@ -2183,7 +2265,8 @@ export class AreaGlanceCard extends LitElement {
     if (!this._config) return nothing;
     if (this._config.profile === "chart") {
       const appearance = this._config.appearance;
-      const background = appearance?.background ?? this._config.background;
+      const surface = this._appearanceSurface();
+      const background = surface.background;
       const shadowMode = this._shadowMode();
       const textWeight = appearance?.text_weight ?? (appearance?.style === "light" ? "light" : "bold");
       const history = this._chartLivePoints();
@@ -2194,8 +2277,9 @@ export class AreaGlanceCard extends LitElement {
       const chartStacked = this._config.layout === "stacked";
       const chartHeaderAlignment = chartStacked ? this._config.header_alignment ?? "left" : "left";
       const multiChart = this._config.chart?.type === "multi_line";
-      return html`<ha-card class=${`chart-card ${this._config.theme === "dark" ? "force-dark" : this._config.theme === "light" ? "force-light" : ""}${textWeight !== "bold" ? ` ${textWeight}-weight` : ""}${shadowMode === "none" ? " no-shadow" : shadowMode === "inner" ? " inner-shadow" : ""}`} style=${`--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);${background ? `--area-glance-card-background:${background}` : ""}${this._shadowStyle()}${this._layoutStyle(0)}`}>
-        <section class=${`chart-layout${chartStacked ? " stacked" : ""}${multiChart ? " multi-chart-layout" : ""}`}><div class=${`chart-summary summary align-${chartHeaderAlignment}`} style=${`--area-glance-title-fit:${titleFit}`}><span class=${`title ${titleLines}`}>${chartTitle}</span>${multiChart && !explicitStatus?.line ? this._renderMultiLegend() : html`<span class="chart-value">${explicitStatus?.line ?? this._chartSummary(history)}</span>`}<span class="chart-range">${explicitStatus?.age ?? this._chartRangeLabel()}</span></div><button class="chart-plot" aria-label=${`Open ${chartTitle} details`} @click=${this._chartClicked}>${this._renderChart()}</button></section>
+      const dashboardDark = this.hass?.themes?.darkMode === true;
+      return html`<ha-card class=${`chart-card ${dashboardDark ? "dashboard-dark" : ""} ${surface.theme === "dark" ? "force-dark" : surface.theme === "light" ? "force-light" : ""}${textWeight !== "bold" ? ` ${textWeight}-weight` : ""}${shadowMode === "none" ? " no-shadow" : shadowMode === "inner" ? " inner-shadow" : ""}`} style=${`${this._appearanceStyle(background)}${this._shadowStyle()}${this._layoutStyle(0)}`}>
+        <section class=${`chart-layout${chartStacked ? " stacked" : ""}${multiChart ? " multi-chart-layout" : ""}`}><div class=${`chart-summary summary align-${chartHeaderAlignment}`} style=${`--area-glance-title-fit:${titleFit}`}><span class=${`title ${titleLines}`}>${chartTitle}</span>${multiChart && !explicitStatus?.line ? this._renderMultiLegend() : html`<span class="chart-value">${explicitStatus?.line ?? this._chartSummary(history)}</span>`}<span class="chart-range">${explicitStatus?.age ?? this._chartHeaderRange(history)}</span></div><button class="chart-plot" aria-label=${`Open ${chartTitle} details`} @click=${this._chartClicked}>${this._renderChart()}</button></section>
       </ha-card>${this._renderChartContributorSheet()}`;
     }
     const status = this._status();
@@ -2209,7 +2293,8 @@ export class AreaGlanceCard extends LitElement {
     const statusLines = this._headerLineMode("status");
     const titleFit = this._headerTitleFit(title, titleLines);
     const appearance = this._config.appearance;
-    const background = appearance?.background ?? this._config.background;
+    const surface = this._appearanceSurface();
+    const background = surface.background;
     const shadowMode = this._shadowMode();
     const headerAction = this._config.header_action ?? this._config;
     const headerClickable = Boolean(headerAction.action && headerAction.action !== "none");
@@ -2217,8 +2302,9 @@ export class AreaGlanceCard extends LitElement {
     const textWeight = appearance?.text_weight ?? (appearance?.style === "light" ? "light" : "bold");
     const showAreaIcon = appearance?.show_area_icon === true;
     const showInsightIcons = appearance?.show_insight_icons !== false;
+    const dashboardDark = this.hass?.themes?.darkMode === true;
     return html`
-      <ha-card class=${`${this._config.theme === "dark" ? "force-dark" : this._config.theme === "light" ? "force-light" : ""}${textWeight !== "bold" ? ` ${textWeight}-weight` : ""}${shadowMode === "none" ? " no-shadow" : shadowMode === "inner" ? " inner-shadow" : ""}${headerClickable ? " clickable" : ""}`} style=${`--ha-card-border-radius:var(--area-glance-card-border-radius, 24px);${background ? `--area-glance-card-background:${background}` : ""}${this._shadowStyle()}`} @click=${this._headerClicked}>
+      <ha-card class=${`${dashboardDark ? "dashboard-dark" : ""} ${surface.theme === "dark" ? "force-dark" : surface.theme === "light" ? "force-light" : ""}${textWeight !== "bold" ? ` ${textWeight}-weight` : ""}${shadowMode === "none" ? " no-shadow" : shadowMode === "inner" ? " inner-shadow" : ""}${headerClickable ? " clickable" : ""}`} style=${`${this._appearanceStyle(background)}${this._shadowStyle()}`} @click=${this._headerClicked}>
         <section class=${showHeader ? `layout${this._config.layout === "stacked" ? " stacked" : ""}${this._config.layout === "tower" ? ` tower tower-icons-${this._towerIconMode}` : ""}${showAreaIcon ? " area-icon-layout" : ""}${showInsightIcons ? "" : " insight-icons-hidden"}` : `layout metrics-only${showInsightIcons ? "" : " insight-icons-hidden"}`} style=${this._layoutStyle(metrics.length)}>
           ${showHeader ? html`<div class=${`summary align-${headerAlignment}${showAreaIcon ? " with-area-icon" : ""}`} style=${`--area-glance-title-fit:${titleFit}`}>
               ${showAreaIcon ? html`<span class="area-icon" aria-hidden="true"><ha-icon icon=${this._headerAreaIcon(title)}></ha-icon></span>` : nothing}
@@ -2266,7 +2352,7 @@ export class AreaGlanceCard extends LitElement {
 
   static styles = css`
     :host { display:block; --area-glance-accent:var(--primary-color); }
-    ha-card { overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 8%, transparent); border-radius:var(--area-glance-card-border-radius, 24px); cursor:default; background:var(--area-glance-card-background, var(--card-background-color, #fff)); box-shadow:0 8px 24px var(--area-glance-shadow-spread, 0px) rgb(0 0 0 / var(--area-glance-shadow-opacity, .18)); }
+    ha-card { overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 8%, transparent); border-radius:var(--area-glance-card-border-radius, 24px); cursor:default; background:var(--area-glance-card-background, var(--card-background-color, #fff)); box-shadow:var(--area-glance-shadow-x, 0px) var(--area-glance-shadow-y, 8px) 24px var(--area-glance-shadow-spread, 0px) color-mix(in srgb, var(--area-glance-shadow-color, #000) var(--area-glance-shadow-opacity, 18%), transparent); }
     .chart-layout { box-sizing:border-box; height:var(--area-glance-chart-height, 136px); min-height:104px; display:grid; grid-template-columns:clamp(108px, 23%, 152px) minmax(0, 1fr); gap:0; align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
     .chart-layout.stacked { height:calc(var(--area-glance-chart-height, 136px) + 42px); grid-template-columns:minmax(0, 1fr); grid-template-rows:auto minmax(0, 1fr); gap:4px; }
     .chart-summary { display:flex; min-width:0; flex-direction:column; justify-content:center; gap:5px; }
@@ -2299,24 +2385,26 @@ export class AreaGlanceCard extends LitElement {
     .chart-area.negative { fill:color-mix(in srgb, var(--area-glance-chart-negative, var(--orange-color, #e85d20)) 22%, transparent); }
     .chart-area.multi { opacity:.18; }
     .chart-line.multi { stroke-width:1.8; }
-    .chart-bar { fill:color-mix(in srgb, var(--area-glance-chart-positive, var(--primary-text-color)) 62%, transparent); }
+    .chart-bar { fill:var(--area-glance-chart-positive, var(--primary-text-color)); opacity:var(--area-glance-chart-bar-opacity, 1); }
     .chart-bar.daily { fill:var(--area-glance-chart-daily-primary); }
     .chart-bar.negative { fill:var(--area-glance-chart-negative, var(--orange-color, #e85d20)); }
     .chart-bar.weekend { fill:var(--area-glance-chart-weekend); }
     /* Today's daily-total bar is incomplete: reserve the secondary orange for it. */
     .chart-bar.current { fill:var(--area-glance-chart-today, var(--orange-color, #e85d20)); }
+    .chart-average-line { stroke:var(--area-glance-chart-average, var(--primary-color)); stroke-width:var(--area-glance-chart-average-width, 1px); vector-effect:non-scaling-stroke; }
+    .chart-average-line.dashed { stroke-dasharray:4 3; }
     /* Chart annotations are deliberately quieter than the card's main value. */
-    .chart-bar-value { fill:var(--secondary-text-color); font:11px/1 var(--primary-font-family, inherit); font-size:calc(11px * var(--area-glance-chart-bar-scale, 1)) !important; font-variant-numeric:tabular-nums; }
+    .chart-bar-value { fill:var(--secondary-text-color); font:11px/1 var(--primary-font-family, inherit); font-size:calc(11px * var(--area-glance-chart-bar-scale, 1)) !important; font-variant-numeric:tabular-nums; paint-order:stroke fill; stroke:var(--area-glance-card-background, var(--card-background-color, #fff)); stroke-width:3px; stroke-linejoin:round; }
     .chart-bar-value.weekend, .chart-tick.weekend { fill:var(--area-glance-chart-weekend); }
     .chart-bar-value.current { fill:var(--area-glance-chart-today, var(--orange-color, #e85d20)); font-weight:650; }
     .chart-tick, .chart-scale, .chart-unit { fill:var(--secondary-text-color); font:8px/1 var(--primary-font-family, inherit); font-variant-numeric:tabular-nums; }
     .chart-tick { font-size:calc(9px * var(--area-glance-chart-x-scale, 1)) !important; }
     .chart-scale { font-size:calc(9px * var(--area-glance-chart-y-scale, 1)); }
-    .chart-unit { fill:var(--primary-text-color); font-size:calc(8px * var(--area-glance-chart-y-scale, 1)); font-weight:650; }
+    .chart-unit { fill:var(--primary-text-color); font-size:calc(8px * var(--area-glance-chart-y-scale, 1)); font-weight:650; paint-order:stroke fill; stroke:var(--area-glance-card-background, var(--card-background-color, #fff)); stroke-width:3px; stroke-linejoin:round; }
     .chart-empty { display:grid; place-items:center; min-height:116px; color:var(--secondary-text-color); font-size:.9rem; }
     ha-card.clickable { cursor:pointer; }
     ha-card.no-shadow { box-shadow:none; }
-    ha-card.inner-shadow { border-color:color-mix(in srgb, var(--primary-text-color) 13%, transparent); box-shadow:inset 0 2px 12px var(--area-glance-shadow-spread, 0px) rgb(0 0 0 / var(--area-glance-shadow-opacity, .18)), inset 0 1px 0 rgb(255 255 255 / .1); }
+    ha-card.inner-shadow { border-color:color-mix(in srgb, var(--primary-text-color) 13%, transparent); box-shadow:inset 0 2px 12px var(--area-glance-shadow-spread, 0px) color-mix(in srgb, var(--area-glance-shadow-color, #000) var(--area-glance-shadow-opacity, 18%), transparent), inset 0 1px 0 rgb(255 255 255 / .1); }
     .layout { min-height:var(--area-glance-content-height, 78px); display:grid; grid-template-columns:clamp(108px, 23%, 152px) minmax(0, 1fr); align-items:stretch; padding:var(--area-glance-pad-y, 8px) var(--area-glance-pad-x, 12px); }
     .layout.area-icon-layout { grid-template-columns:clamp(150px, 26%, 208px) minmax(0, 1fr); padding-inline:max(14px, var(--area-glance-pad-x, 12px)); }
     .layout.metrics-only { grid-template-columns:minmax(0, 1fr); }
@@ -2408,8 +2496,11 @@ export class AreaGlanceCard extends LitElement {
     .value-primary { min-width:0; overflow:hidden; text-overflow:ellipsis; }
     .value-unit { flex:none; margin-left:.06em; font-size:calc(1em * var(--area-glance-unit-fit, 1)); font-weight:700; letter-spacing:-.045em; }
     .label { color:var(--secondary-text-color); font-size:calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1) * var(--area-glance-label-scale, 1)); font-size:min(calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1) * var(--area-glance-label-scale, 1)), calc(var(--area-glance-label-cap, 15cqi) * var(--area-glance-label-scale, 1))); font-weight:550; line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; margin-top:1px; }
-    .force-dark { --area-glance-card-background:#353c45; --primary-text-color:#f5f7fb; --secondary-text-color:#c4ccd8; }
-    .force-light { --area-glance-card-background:#fff; --primary-text-color:#18212e; --secondary-text-color:#5f6b7e; }
+    /* Dashboard-dark surfaces get a restrained, brighter edge so a card reads
+       cleanly against HA's dark page background without looking outlined. */
+    .dashboard-dark:not(.force-light) { border-color:color-mix(in srgb, #fff 14%, transparent); }
+    .force-dark { --ha-card-background:#353c45; --area-glance-card-background:#353c45; --primary-text-color:#f5f7fb; --secondary-text-color:#c4ccd8; }
+    .force-light { --ha-card-background:#fff; --area-glance-card-background:#fff; --primary-text-color:#18212e; --secondary-text-color:#5f6b7e; }
     .detail-sheet { box-sizing:border-box; width:min(560px, calc(100vw - 32px)); max-height:min(78dvh, 720px); padding:0; border:0; border-radius:22px; color:var(--primary-text-color); background:var(--ha-card-background, var(--card-background-color)); box-shadow:0 18px 50px rgb(0 0 0 / 28%); overflow:hidden; }
     .detail-sheet.aggregate-sheet.scrollable-sheet { height:min(78dvh, 720px); }
     .detail-sheet::backdrop { background:rgb(0 0 0 / 30%); backdrop-filter:blur(8px); }
@@ -2473,7 +2564,7 @@ export class AreaGlanceCard extends LitElement {
     .light-control-panel .detail-control { width:56px; height:32px; }
     .light-control-panel .detail-toggle-thumb { width:26px; height:26px; }
     @media (max-width: 500px) { .detail-sheet { width:calc(100vw - 20px); max-height:84dvh; border-radius:20px; } .detail-sheet.aggregate-sheet.scrollable-sheet { height:84dvh; } .aggregate-panel { padding:22px 18px; } .detail-aggregate-entity { padding:10px 12px; gap:11px; } .light-control-panel { padding:22px 18px; } .light-control-panel .detail-entity { padding:11px 13px; gap:11px; } .light-control-panel .detail-icon-badge { width:44px; height:44px; } .light-control-panel .detail-icon-badge ha-icon { width:24px; height:24px; } }
-    @media (max-width: 500px) { ha-card { border-radius:22px; } .layout { grid-template-columns:clamp(88px, 25%, 108px) minmax(0, 1fr); padding:7px 8px; } .layout.area-icon-layout { grid-template-columns:clamp(130px, 31%, 160px) minmax(0, 1fr); padding-inline:9px; } .summary.with-area-icon { grid-template-columns:37px minmax(0, 1fr); gap:7px; } .area-icon { width:37px; height:37px; } .area-icon ha-icon { width:22px; height:22px; } .title { font-size:min(calc(var(--area-glance-title-size, 1.8rem) * var(--area-glance-title-scale, 1)), calc(1.48rem * var(--area-glance-title-scale, 1))); } .status { font-size:calc(var(--area-glance-status-size, .85rem) * var(--area-glance-status-scale, 1)); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .label { margin-top:1px; } }
+    @media (max-width: 500px) { ha-card { border-radius:var(--area-glance-card-border-radius, 22px); } .layout { grid-template-columns:clamp(88px, 25%, 108px) minmax(0, 1fr); padding:7px 8px; } .layout.area-icon-layout { grid-template-columns:clamp(130px, 31%, 160px) minmax(0, 1fr); padding-inline:9px; } .summary.with-area-icon { grid-template-columns:37px minmax(0, 1fr); gap:7px; } .area-icon { width:37px; height:37px; } .area-icon ha-icon { width:22px; height:22px; } .title { font-size:min(calc(var(--area-glance-title-size, 1.8rem) * var(--area-glance-title-scale, 1)), calc(1.48rem * var(--area-glance-title-scale, 1))); } .status { font-size:calc(var(--area-glance-status-size, .85rem) * var(--area-glance-status-scale, 1)); } .metric { padding:2px 1px; } ha-icon { width:min(var(--area-glance-icon-size, 24px), 22px); height:min(var(--area-glance-icon-size, 24px), 22px); margin-bottom:1px; } .label { margin-top:1px; } }
     @media (max-width: 420px) { .chart-layout { grid-template-columns:clamp(88px, 25%, 108px) minmax(0, 1fr); padding:var(--area-glance-pad-y, 7px) var(--area-glance-pad-x, 8px); gap:0; } .chart-value { font-size:1rem; } }
   `;
 }
@@ -2737,6 +2828,8 @@ export class AreaGlanceCardEditor extends LitElement {
         ${type === "line" ? html`<label>Grid lines<select .value=${chart.grid_lines ?? "none"} @change=${(event: Event) => this._chartChanged({ grid_lines: (event.target as HTMLSelectElement).value as NonNullable<ChartConfig["grid_lines"]> })}><option value="none">None (default)</option><option value="x">Vertical, time guides</option><option value="y">Horizontal, value guides</option><option value="both">Both axes</option></select></label><p class="slot-hint">Faint guides align to the visible time and value-axis labels, behind the line.</p>` : nothing}
         ${type === "line" || type === "columns" ? html`<div class="two"><label>Positive colour<input type="color" .value=${chart.positive_color ?? "#263238"} @input=${(event: Event) => this._chartChanged({ positive_color: (event.target as HTMLInputElement).value })}></label><label>Negative / export colour<input type="color" .value=${chart.negative_color ?? "#e85d20"} @input=${(event: Event) => this._chartChanged({ negative_color: (event.target as HTMLInputElement).value })}></label></div><p class="slot-hint">Orange marks values below zero, such as grid export. Leave the defaults for the restrained chart style.</p>` : nothing}
         ${daily ? html`<div class="three"><label>Primary colour<input type="color" .value=${chart.daily_primary_color ?? "#6b7280"} @input=${(event: Event) => this._chartChanged({ daily_primary_color: (event.target as HTMLInputElement).value })}></label><label>Weekend colour<input type="color" .value=${chart.weekend_color ?? "#4f555b"} @input=${(event: Event) => this._chartChanged({ weekend_color: (event.target as HTMLInputElement).value })}></label><label>Today colour<input type="color" .value=${chart.today_color ?? "#e85d20"} @input=${(event: Event) => this._chartChanged({ today_color: (event.target as HTMLInputElement).value })}></label></div><p class="slot-hint">Weekends are darker than completed weekdays. Today is highlighted because it is incomplete.</p>` : nothing}
+        ${type === "columns" || daily ? html`<label>Bar opacity<input type="range" min="20" max="100" step="5" .value=${String(chart.bar_opacity ?? 100)} @input=${(event: Event) => this._chartChanged({ bar_opacity: Number((event.target as HTMLInputElement).value) })}><span class="range-value">${chart.bar_opacity ?? 100}%</span></label><p class="slot-hint">Solid bars are the default. Lower this only when you want a lighter visual treatment.</p>` : nothing}
+        ${daily ? html`<label class="checkbox"><input type="checkbox" .checked=${chart.daily_average === true} @change=${(event: Event) => this._chartChanged({ daily_average: (event.target as HTMLInputElement).checked || undefined })}> Show average line</label>${chart.daily_average ? html`<div class="three"><label>Line style<select .value=${chart.daily_average_style ?? "dashed"} @change=${(event: Event) => this._chartChanged({ daily_average_style: (event.target as HTMLSelectElement).value as "solid" | "dashed" })}><option value="dashed">Dashed (default)</option><option value="solid">Solid</option></select></label><label>Colour<input type="color" .value=${chart.daily_average_color ?? "#03a9f4"} @input=${(event: Event) => this._chartChanged({ daily_average_color: (event.target as HTMLInputElement).value })}></label><label>Thickness<input type="number" min="1" max="4" step="1" .value=${String(chart.daily_average_thickness ?? 1)} @input=${(event: Event) => this._chartChanged({ daily_average_thickness: Math.max(1, Math.min(4, Number((event.target as HTMLInputElement).value))) })}></label></div><label class="checkbox"><input type="checkbox" .checked=${chart.daily_average_header !== false} @change=${(event: Event) => this._chartChanged({ daily_average_header: (event.target as HTMLInputElement).checked || undefined })}> Show AVG in header</label><p class="slot-hint">Average is calculated from the displayed daily totals, including today so far. The main header value remains today's total.</p>` : nothing}` : nothing}
         ${daily ? html`<label class="checkbox"><input type="checkbox" .checked=${chart.daily_horizontal_grid === true} @change=${(event: Event) => this._chartChanged({ daily_horizontal_grid: (event.target as HTMLInputElement).checked })}> Show horizontal value guides</label><p class="slot-hint">Faint guides align to the visible value-axis labels and sit behind the bars.</p>` : nothing}
         ${daily ? html`<label class="checkbox"><input type="checkbox" .checked=${chart.daily_week_dividers === true} @change=${(event: Event) => this._chartChanged({ daily_week_dividers: (event.target as HTMLInputElement).checked })}> Show week dividers</label>${chart.daily_week_dividers ? html`<label>Week starts on<select .value=${chart.week_start ?? (chart.week_end === "saturday" ? "sunday" : "monday")} @change=${(event: Event) => this._chartChanged({ week_start: (event.target as HTMLSelectElement).value as "monday" | "sunday", week_end: undefined })}><option value="monday">Monday (default)</option><option value="sunday">Sunday</option></select></label><p class="slot-hint">A faint divider is drawn at the end of each calendar week, behind the bars.</p>` : nothing}` : nothing}
         <div class="two"><label>Value-axis minimum<input type="number" step="any" .value=${chart.axis_min?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._chartChanged({ axis_min: value === "" ? undefined : Number(value) }); }}></label><label>Value-axis maximum<input type="number" step="any" .value=${chart.axis_max?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._chartChanged({ axis_max: value === "" ? undefined : Number(value) }); }}></label></div><p class="slot-hint">Optional fixed limits for the plotted values. Leave both blank to keep the automatic scale.</p>
@@ -2746,13 +2839,15 @@ export class AreaGlanceCardEditor extends LitElement {
       </details></section>`;
   }
   private _appearancePresetChanged(event: Event) {
-    const preset = (event.target as HTMLSelectElement).value as NonNullable<NonNullable<AreaGlanceConfig["appearance"]>["preset"]>;
+    const preset = (event.target as HTMLSelectElement).value as AppearancePreset;
     if (preset === "custom") {
-      this._change({ theme: "dark", background: undefined, appearance: { ...this._config.appearance, preset, background: this._config.appearance?.background ?? "#353c45" } });
+      const wasCustom = this._config.appearance?.preset === "custom";
+      this._change({ theme: "dark", background: undefined, appearance: { ...this._config.appearance, preset, background: wasCustom ? this._config.appearance?.background ?? DEFAULT_CUSTOM_BACKGROUND : DEFAULT_CUSTOM_BACKGROUND } });
       return;
     }
-    const appearance = APPEARANCE_PRESETS[preset];
-    this._change({ theme: appearance.theme, background: undefined, appearance: { ...this._config.appearance, preset, background: appearance.background } });
+    // Keep a compact, unambiguous configuration going forward. The renderer
+    // resolves named presets itself; legacy top-level fields are fallback-only.
+    this._change({ theme: undefined, background: undefined, appearance: { ...this._config.appearance, preset, background: undefined } });
   }
   private _customBackgroundChanged(event: Event) {
     this._change({ appearance: { ...this._config.appearance, preset: "custom", background: (event.target as HTMLInputElement).value } });
@@ -2768,8 +2863,22 @@ export class AreaGlanceCardEditor extends LitElement {
     const shadow_spread = Math.max(-12, Math.min(16, Number((event.target as HTMLInputElement).value)));
     this._change({ appearance: { ...this._config.appearance, shadow_spread: shadow_spread || undefined } });
   }
+  private _shadowOffsetChanged(axis: "x" | "y", event: Event) {
+    const value = Math.max(-16, Math.min(16, Number((event.target as HTMLInputElement).value)));
+    this._change({ appearance: { ...this._config.appearance, [axis === "x" ? "shadow_x" : "shadow_y"]: value || undefined } });
+  }
+  private _shadowColorChanged(event: Event) {
+    this._change({ appearance: { ...this._config.appearance, shadow_color: (event.target as HTMLInputElement).value.toUpperCase() } });
+  }
+  private _cornerRadiusChanged(event: Event) {
+    const corner_radius = Math.max(0, Math.min(48, Number((event.target as HTMLInputElement).value)));
+    this._change({ appearance: { ...this._config.appearance, corner_radius: corner_radius === 24 ? undefined : corner_radius } });
+  }
+  private _resetCornerRadius() {
+    this._change({ appearance: { ...this._config.appearance, corner_radius: undefined } });
+  }
   private _resetShadowFineTuning() {
-    this._change({ appearance: { ...this._config.appearance, shadow_opacity: undefined, shadow_spread: undefined } });
+    this._change({ appearance: { ...this._config.appearance, shadow_opacity: undefined, shadow_spread: undefined, shadow_x: undefined, shadow_y: undefined, shadow_color: undefined } });
   }
   private _textWeightChanged(event: Event) {
     this._change({ appearance: { ...this._config.appearance, text_weight: (event.target as HTMLSelectElement).value as "bold" | "regular" | "light", style: undefined } });
@@ -3275,11 +3384,18 @@ export class AreaGlanceCardEditor extends LitElement {
     const metrics = this._config.metrics ?? [];
     const purpose = this._purpose();
     const chart = this._config.chart ?? {};
-    const appearancePreset = this._config.appearance?.preset ?? "theme";
+    const explicitAppearancePreset = this._config.appearance?.preset as AppearancePreset | undefined;
+    const legacyBackground = this._config.background;
+    const appearancePreset: AppearancePreset = explicitAppearancePreset
+      ?? (legacyBackground ? "custom" : this._config.theme === "light" ? "light" : this._config.theme === "dark" ? "charcoal" : "theme");
     const textScale = this._config.appearance?.text_scale ?? {};
     const shadowStyle = this._config.appearance?.shadow_style ?? (this._config.appearance?.shadow === false ? "none" : "drop");
     const shadowOpacity = Math.max(0, Math.min(60, Number(this._config.appearance?.shadow_opacity ?? 18)));
     const shadowSpread = Math.max(-12, Math.min(16, Number(this._config.appearance?.shadow_spread ?? 0)));
+    const shadowX = Math.max(-16, Math.min(16, Number(this._config.appearance?.shadow_x ?? 0)));
+    const shadowY = Math.max(-16, Math.min(16, Number(this._config.appearance?.shadow_y ?? 8)));
+    const shadowColor = /^#[0-9a-f]{6}$/i.test(this._config.appearance?.shadow_color ?? "") ? this._config.appearance?.shadow_color ?? "#000000" : "#000000";
+    const cornerRadius = Math.max(0, Math.min(48, Number(this._config.appearance?.corner_radius ?? 24)));
     const textScaleControls = (purpose === "chart"
       ? [["title", "Header"], ["value", "Header value"], ["label", "History range"], ["chart_x_axis", "X-axis labels"], ["chart_y_axis", "Y-axis labels"], ["chart_bar_labels", "Bar values"]]
       : [["title", "Header"], ["status", "Header status"], ["value", "Insight values"], ["label", "Insight labels"]]
@@ -3435,8 +3551,11 @@ export class AreaGlanceCardEditor extends LitElement {
         ${purpose !== "chart" ? html`<label class="checkbox"><input type="checkbox" .checked=${this._config.appearance?.show_insight_icons !== false} @change=${this._insightIconVisibilityChanged}> Show insight icons</label>${this._config.appearance?.show_insight_icons !== false ? html`<label>Insight icon colours<select .value=${this._config.appearance?.insight_icon_color ?? "default"} @change=${this._insightIconColorChanged}><option value="default">Preset colours (default)</option><option value="black">Black</option><option value="grey">Grey</option></select></label><p class="slot-hint">Changes the shared default only. A colour set in an insight's Fine tuning, including threshold or state colours, still wins.</p>` : nothing}<p class="slot-hint">Turn icons off for a quieter, value-led look. Camera previews, analogue clocks, and calendar tiles keep their dedicated visual display.</p>` : nothing}
         <label>Colour style<select .value=${appearancePreset} @change=${this._appearancePresetChanged}><option value="theme">Use dashboard theme</option><option value="light">Light</option><option value="slate">Slate</option><option value="charcoal">Dark</option><option value="custom">Custom background</option></select></label>
         ${appearancePreset === "custom" ? html`<label>Background colour <input type="color" .value=${this._config.appearance?.background ?? "#353c45"} @input=${this._customBackgroundChanged}></label>` : nothing}
+        <div class="text-scale-row"><label>Corner rounding<input type="range" min="0" max="48" step="1" .value=${String(cornerRadius)} @input=${this._cornerRadiusChanged}></label><output>${cornerRadius}px</output></div>
+        <p class="slot-hint">Applies to every card layout, including charts, towers, and camera feeds. The responsive default is retained at 24px.</p>
+        ${this._config.appearance?.corner_radius !== undefined ? html`<button class="reset-membership" @click=${this._resetCornerRadius}>Reset corner rounding</button>` : nothing}
         <label>Card shadow<select .value=${shadowStyle} @change=${this._shadowStyleChanged}><option value="drop">Raised (drop shadow)</option><option value="inner">Sunken (inner shadow)</option><option value="none">No shadow</option></select></label>
-        ${shadowStyle !== "none" ? html`<div class="two shadow-controls"><div class="text-scale-row"><label>Shadow opacity<input type="range" min="0" max="60" step="1" .value=${String(shadowOpacity)} @input=${this._shadowOpacityChanged}></label><output>${shadowOpacity}%</output></div><div class="text-scale-row"><label>Shadow spread<input type="range" min="-12" max="16" step="1" .value=${String(shadowSpread)} @input=${this._shadowSpreadChanged}></label><output>${shadowSpread}px</output></div></div><p class="slot-hint">Spread adjusts how far the shadow reaches; inner shadow gives the card a recessed surface.</p>${this._config.appearance?.shadow_opacity !== undefined || this._config.appearance?.shadow_spread !== undefined ? html`<button class="reset-membership" @click=${this._resetShadowFineTuning}>Reset shadow fine tuning</button>` : nothing}` : nothing}
+        ${shadowStyle !== "none" ? html`<div class="two shadow-controls"><div class="text-scale-row"><label>Shadow opacity<input type="range" min="0" max="60" step="1" .value=${String(shadowOpacity)} @input=${this._shadowOpacityChanged}></label><output>${shadowOpacity}%</output></div><div class="text-scale-row"><label>Shadow spread<input type="range" min="-12" max="16" step="1" .value=${String(shadowSpread)} @input=${this._shadowSpreadChanged}></label><output>${shadowSpread}px</output></div></div>${shadowStyle === "drop" ? html`<div class="two shadow-controls"><div class="text-scale-row"><label>Horizontal offset<input type="range" min="-16" max="16" step="1" .value=${String(shadowX)} @input=${(event: Event) => this._shadowOffsetChanged("x", event)}></label><output>${shadowX}px</output></div><div class="text-scale-row"><label>Vertical offset<input type="range" min="-16" max="16" step="1" .value=${String(shadowY)} @input=${(event: Event) => this._shadowOffsetChanged("y", event)}></label><output>${shadowY}px</output></div></div>` : nothing}<label>Shadow colour <input type="color" .value=${shadowColor} @input=${this._shadowColorChanged}></label><p class="slot-hint">Defaults to black. In dark dashboards, try a low-opacity white shadow for a soft glow.</p>${this._config.appearance?.shadow_opacity !== undefined || this._config.appearance?.shadow_spread !== undefined || this._config.appearance?.shadow_x !== undefined || this._config.appearance?.shadow_y !== undefined || this._config.appearance?.shadow_color !== undefined ? html`<button class="reset-membership" @click=${this._resetShadowFineTuning}>Reset shadow fine tuning</button>` : nothing}` : nothing}
         <details class="typography"><summary>Text size and weight</summary><p class="slot-hint">Applies across the whole card. The default is 100% with bold text. Choose 75–160%; long values still shrink or truncate at very narrow widths to keep the band intact.</p>
           <label>Text weight<select .value=${this._config.appearance?.text_weight ?? (this._config.appearance?.style === "light" ? "light" : "bold")} @change=${this._textWeightChanged}><option value="bold">Bold (default)</option><option value="regular">Regular</option><option value="light">Light</option></select></label>
           ${textScaleControls.map(([key, label]) => html`<div class="text-scale-row"><label>${label}<input type="range" min="75" max="160" step="1" .value=${String(textScale[key] ?? 100)} @input=${(event: Event) => this._textScaleChanged(key, event)}></label><output>${textScale[key] ?? 100}%</output></div>`)}

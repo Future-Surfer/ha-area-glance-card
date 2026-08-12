@@ -63,15 +63,19 @@ Camera previews can be used individually or via the Cameras profile, which selec
 - Keep styles as a small named set backed by CSS variables; do not introduce arbitrary CSS controls.
 - Implement this after the Chart profile, so the first chart establishes the shared visual primitives rather than two styling systems evolving independently.
 
-### Rich insight visualisations
+### Mini Charts in insight slots
 
-**Goal:** Let an insight use its fixed slot for more than an icon and value when that makes the state meaningfully easier to understand.
+**Goal:** Let a normal insight slot show a small, useful visual history without becoming a second full Chart card or disturbing the compact band.
 
-- Start with compact, opt-in history visualisations for numeric entity insights: sparkline, columns/bars, and a simple current-versus-range treatment.
-- Keep the band layout stable: a visual may be cropped to its existing insight slot, but must never claim extra width or make neighbouring insights jump.
+- Start with opt-in visuals for compatible numeric insights: a sparkline, compact columns/bars, and a simple current-versus-range treatment.
+- Reuse the Chart profile's history/statistics adapter, caching, scale logic, formatting, and unavailable-history treatment rather than introducing another data path.
+- Keep the surrounding layout stable: a Mini Chart lives entirely inside its existing insight slot, is cropped to that slot, and never claims width from neighbouring insights.
+- Make the visual subordinate to the current value. At narrow widths, retain a truthful value or fall back calmly rather than rendering an illegible graph.
 - Treat pie/donut displays as an intentionally narrow use case for discrete parts-of-a-whole aggregates such as lights on/off, rather than a generic chart type.
 - Define clear data requirements and graceful fallbacks when Recorder/history is unavailable; no guessed history and no heavy per-card polling.
 - Reuse Home Assistant’s own history/statistics APIs and formatting conventions where possible.
+
+**Done when:** a user can enable a compact history treatment for one compatible insight, understand it at a glance, and stack several cards without visual instability or repeated history requests.
 
 ### Multi-entity chart aggregation
 

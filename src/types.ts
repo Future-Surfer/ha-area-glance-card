@@ -41,6 +41,7 @@ export interface EntityState {
 
 export interface HassLike {
   states: Record<string, EntityState>;
+  themes?: { darkMode?: boolean };
   entities?: Record<string, { area_id?: string; device_id?: string }>;
   devices?: Record<string, { area_id?: string }>;
   areas?: Record<string, { name?: string }>;
@@ -78,8 +79,20 @@ export interface ChartConfig {
   weekend_color?: string;
   /** Primary colour for completed daily-total bars. */
   daily_primary_color?: string;
+  /** Opacity of column and daily-total bars (20–100); solid is the default. */
+  bar_opacity?: number;
   /** Highlight colour for the incomplete current-day daily-total bar. */
   today_color?: string;
+  /** Optional arithmetic-average reference line for the displayed daily totals. */
+  daily_average?: boolean;
+  /** Include the displayed-range average beside the chart range in the header. */
+  daily_average_header?: boolean;
+  /** Visual treatment for the optional daily-total average line. */
+  daily_average_style?: "solid" | "dashed";
+  /** Explicit colour for the optional daily-total average line. */
+  daily_average_color?: string;
+  /** Stroke width in pixels for the optional daily-total average line. */
+  daily_average_thickness?: number;
   /** @deprecated Chart annotation sizing now lives in appearance.text_scale. */
   x_axis_font_size?: number;
   /** @deprecated Chart annotation sizing now lives in appearance.text_scale. */
@@ -251,12 +264,20 @@ export interface AreaGlanceConfig extends ActionConfig {
     /** Optional MDI override for the Light-style header icon. */
     area_icon?: string;
     background?: string;
+    /** Shared outer-card corner radius in pixels. Leave unset for the responsive default. */
+    corner_radius?: number;
     /** Controls whether the card is raised, sunken, or has no shadow. */
     shadow_style?: "drop" | "inner" | "none";
     /** Shadow darkness as a percentage. Defaults to the existing 18% shadow. */
     shadow_opacity?: number;
     /** CSS shadow spread in pixels. */
     shadow_spread?: number;
+    /** Horizontal offset for raised shadows only. */
+    shadow_x?: number;
+    /** Vertical offset for raised shadows only. */
+    shadow_y?: number;
+    /** Shadow or glow colour. Opacity remains a separate, shared control. */
+    shadow_color?: string;
     /** @deprecated Replaced by shadow_style. Retained so existing card YAML keeps its appearance. */
     shadow?: boolean;
     /** Global percentage adjustments, deliberately shared by every insight. */
