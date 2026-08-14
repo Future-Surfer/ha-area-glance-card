@@ -117,6 +117,58 @@ Camera previews can be used individually or via the Cameras profile, which selec
 
 **Not in scope for the first version:** automatic dashboard generation, floorplans, persisted global navigation state, or claiming that a selected set of rooms represents complete home coverage.
 
+### Yesterday comparison for line charts (exploration)
+
+**Goal:** Make a single-entity line chart useful for a quick “how is today different?” reading without turning it into a multi-series analytics card.
+
+- Add an opt-in **Compare with yesterday** treatment for 24-hour Line charts. Today remains the primary series and uses the chart’s configured positive/negative colours; yesterday is a restrained neutral-grey reference line.
+- Align the two traces by time of day—not by absolute timestamp—so midnight-to-now can be read against the same part of the previous day. Keep the full 24-hour horizontal axis visible.
+- Do not interpolate or invent readings. Preserve recorded gaps and use the existing history/cache adapter to fetch the additional 24-hour window in one bounded request where possible.
+- Keep one shared value axis calculated from both series. This prevents visual exaggeration when yesterday and today differ materially.
+- Put the comparison behind an intentional Chart fine-tuning toggle, with a clear unavailable fallback if the previous day has no recorded history. It should not appear automatically just because a chart happens to be 24 hours long.
+- Do not add a second legend unless testing shows it is needed: a concise chart hint and the deliberately neutral previous-day line should be sufficient in the first version.
+
+**Done when:** a user can enable the comparison on a normal 24-hour line chart and immediately understand today versus yesterday, with honest scales, calm handling of missing history, and no ambiguity about which trace is current.
+
+### Functional single-entity card (exploration)
+
+**Goal:** Offer a larger, entity-led card for one chosen device when a compact area summary is not the right interaction model.
+
+- Add a top-level purpose distinct from **An area**: choose one entity, then derive a purposeful display and controls from its Home Assistant domain and supported features.
+- Begin with a deliberately small set of well-understood types: light, switch, fan, cover, climate, media player, vacuum, and input boolean. Each should use familiar Home Assistant state language and actions rather than a card-specific abstraction.
+- The card should show a clear name, state/value, useful secondary context, and only the controls that are genuinely supported by that entity: for example a toggle, brightness, fan speed, cover position, target temperature, or media transport.
+- Keep service calls touch-safe and optimistic only where Home Assistant provides a reliable subsequent state update. Unavailable or unsupported controls must be calm, disabled, and explanatory.
+- Reuse the existing entity picker, icon and colour controls, actions, typography, themes, shadows, and responsive card shell. This is a new presentation/interaction model, not a parallel custom-card framework.
+- Test entity feature detection against live-like Card Lab fixtures and native Home Assistant patterns before exposing each new domain.
+
+**Done when:** a user can select one supported entity and get a dependable, recognisable control card without configuring a collection of individual buttons or writing service YAML.
+
+### Expandable insight details (exploration)
+
+**Goal:** Let a compact Area Glance band reveal context on demand while preserving its ordinary at-a-glance footprint.
+
+- An explicitly enabled insight or chart can expand within the card to show a restrained detail view: current context, contributor information where applicable, and a small history chart or relevant controls.
+- The collapsed band must remain fully useful and preserve its current height. Expansion should be deliberate, predictable, keyboard-accessible, and visually stable rather than an accidental result of a normal tap.
+- Start with one expanded item at a time and a fixed, bounded detail section. Do not create arbitrary nested dashboards, scroll traps, or an always-open expanded layout.
+- Reuse the Chart renderer and contributor/control infrastructure rather than duplicating history queries, aggregation rules, or entity actions.
+- Resolve action conflicts up front: normal entity more-info, aggregate sheets, expand/collapse, and Action-insight controls need visible, distinct affordances—not competing invisible gestures.
+- Validate expansion in Card Lab across stacked cards, Sections columns, mobile widths, unavailable history, and reduced-motion preferences.
+
+**Done when:** a user can reveal an insight’s useful next layer of detail without making the default band taller, less stable, or harder to scan.
+
+### Quick controls in insight slots (exploration)
+
+**Goal:** Add concise in-place device controls to the area card only where they remain clearly usable at compact dimensions.
+
+- Extend the Action insight concept with an opt-in **Control insight** that can span two adjacent metric slots. The extra width is reserved by the layout model; it must never squeeze neighbouring insights unpredictably.
+- Start with compact, domain-appropriate controls: light/switch toggles, cover position, fan speed, climate target increment/decrement, media transport, and an explicit scene selector. Each control remains selected-entity only in the first version.
+- Let the editor explain the space cost before the user enables it and preview the resulting slot layout. Do not automatically insert controls into area presets.
+- Keep fine tuning contained: allow a chosen supported control style and a conservative label/value arrangement, but avoid a generic button-grid builder.
+- Reuse functional-card capability detection and Home Assistant service/action conventions. Unsupported functions are hidden rather than represented by inert buttons.
+- Establish a clear response strategy for calls: immediate accessible feedback, a short pending state, reliable state reconciliation, and a visible failure fallback.
+
+**Done when:** a user can deliberately give a selected entity a familiar, responsive quick control inside an area card without compromising the readability or stability of ordinary insight slots.
+
 ### Action insights (exploration)
 
 **Goal:** Let an insight become a calm, obvious control when its main job is changing a simple entity state, without weakening the card's dependable read-only summaries.
