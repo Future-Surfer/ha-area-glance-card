@@ -117,18 +117,84 @@ Camera previews can be used individually or via the Cameras profile, which selec
 
 **Not in scope for the first version:** automatic dashboard generation, floorplans, persisted global navigation state, or claiming that a selected set of rooms represents complete home coverage.
 
-### Yesterday comparison for line charts (exploration)
+### Period comparison charts (implemented; validation continues)
 
-**Goal:** Make a single-entity line chart useful for a quick “how is today different?” reading without turning it into a multi-series analytics card.
+**Goal:** Compare one entity against the equivalent earlier period without making a user configure an arbitrary multi-line chart or silently changing what the entity means.
 
-- Add an opt-in **Compare with yesterday** treatment for 24-hour Line charts. Today remains the primary series and uses the chart’s configured positive/negative colours; yesterday is a restrained neutral-grey reference line.
-- Align the two traces by time of day—not by absolute timestamp—so midnight-to-now can be read against the same part of the previous day. Keep the full 24-hour horizontal axis visible.
-- Do not interpolate or invent readings. Preserve recorded gaps and use the existing history/cache adapter to fetch the additional 24-hour window in one bounded request where possible.
-- Keep one shared value axis calculated from both series. This prevents visual exaggeration when yesterday and today differ materially.
-- Put the comparison behind an intentional Chart fine-tuning toggle, with a clear unavailable fallback if the previous day has no recorded history. It should not appear automatically just because a chart happens to be 24 hours long.
-- Do not add a second legend unless testing shows it is needed: a concise chart hint and the deliberately neutral previous-day line should be sufficient in the first version.
+#### Product shape
 
-**Done when:** a user can enable the comparison on a normal 24-hour line chart and immediately understand today versus yesterday, with honest scales, calm handling of missing history, and no ambiguity about which trace is current.
+- Add **Period comparison** as its own Chart type alongside Line, Multiple lines, Columns, and Daily totals. It is not a Line fine-tuning checkbox: selecting it changes the question from “show this history” to “compare this period with another”.
+- The simple path is one choice: **Today vs yesterday**. It uses a full midnight-to-midnight axis; today is the primary coloured trace, yesterday is restrained grey, and today simply ends at the current time.
+- Advanced choices expand the period selector to **Today**, **This week**, **This month**, or **This year**, then offer only meaningful comparisons: the immediately preceding period by default, plus same period last year where the chosen duration makes that useful. The first release should start with current-versus-previous; year-on-year variants follow only once the period adapter is proven.
+- The header keeps the current period's most useful value and has a compact, explicit key such as **Today** / **Yesterday** or **This month** / **Last month**. It must be clear which trace is live/current without consuming the full multi-line legend UI.
+
+#### Honest data modes
+
+- **Live reading** is the automatic mode for measurements and rates: temperature, humidity, COâ‚‚, power, and solar power. It overlays recorded state through matching clock/calendar positions, so solar power today can be read directly against solar power yesterday.
+- **Cumulative period total** is the automatic mode for `total`/`total_increasing` energy, water, gas, and monetary entities. It calculates the period delta from the start of each compared period and plots the growing total, so year-to-date energy can be compared fairly with the same point in the earlier year.
+- The editor shows the selected mode plainly and allows an Advanced override only when the entity's metadata makes both modes meaningful. It must never present a lifetime total-increasing state as if that raw rising number were a live comparison series.
+- Initial Energy Dashboard support is limited to sources that can truthfully become one series. A selected direct entity, Solar, battery charge, or a single configured energy source are good first candidates; combined grid import/export comparison is deferred until it can be represented and explained without ambiguity.
+
+#### Data and rendering rules
+
+- Align traces by elapsed position inside their period, not absolute timestamps. The x-axis labels match the chosen period: time of day, weekdays, dates, or months.
+- Use one shared value axis calculated from both traces. Never normalise each trace independently or stretch a comparison to make a small difference look large.
+- Preserve gaps. There is no interpolation, forecast, or extension of today's line beyond now. Longer comparisons use bounded Recorder statistics/daily buckets; short live comparisons may use raw history, with display decimation only when necessary to retain a truthful visible shape.
+- Cache by entity/source, comparison period, data mode, local time zone, and display settings. Refresh on the existing cadence and at the relevant local day/week/month/year boundary; ignore stale responses.
+- Today/current uses the chosen primary chart colour. Previous uses a quiet neutral grey. Explicit entity/threshold colours never imply the previous trace is current. The default comparison is unfilled to preserve distinction; a subtle fill may be considered later only if tested at narrow widths.
+- A tap opens normal Home Assistant more-info for the selected source. There is no contributor sheet in v1 because comparison still represents one source.
+
+#### Editor flow
+
+1. Choose **Period comparison**.
+2. Confirm the selected source (default to a clear compatible source; the normal entity picker remains immediately available).
+3. Choose **Compare today with yesterday**; Advanced reveals period, comparison basis, and an eligible data-mode override.
+4. Fine tune colours, line thickness, grid guides, unit/decimals, and fixed axis limits using the existing Chart controls.
+
+#### Validation
+
+- Card Lab fixtures: solar power today/yesterday; outside temperature today/yesterday; energy/water current week versus prior week; sparse/missing prior history; unavailable source; dark theme; normal and narrow Sections widths; and a local-midnight rollover.
+- Verify one shared scale, full-period axes, local time-zone boundaries, current line stopping at now, clean source changes, cache refreshes, and no regression to ordinary Line or Multiple lines.
+
+**Current implementation:** the first release provides Today versus yesterday, this week versus last week, this month versus last month, and this year versus last year. Live measurements remain live traces; total-increasing sources automatically become period deltas. The card uses a shared scale, a full-period axis, explicit current/previous legend entries, direct-entity selection, and the existing action model. Card Lab covers both a solar live comparison and a week-to-week cumulative energy comparison.
+
+**Still to validate before release:** local calendar-boundary behaviour on a real HA instance, missing previous-period history, and the longer month/year recorders on installations with sparse statistics.
+
+### Period overlay charts (implemented; validation continues)
+
+**Goal:** Reveal the recurring shape of one source across several equivalent days, weeks, months, or years without turning a focused chart into an arbitrary multi-series configuration.
+
+- **Period overlay** is a dedicated Chart type, separate from two-period comparison. It maps current plus several earlier equivalent periods onto one shared axis.
+- The current period uses the accent colour; older periods use one restrained colour with progressively lower opacity. All traces use one honest value axis and the current trace ends at now.
+- Auto mode keeps a detailed one-prior-day overlay on Recorder history. Larger or longer overlays use a single bounded statistics request for the whole range, then split it locally into calendar windows.
+- Total-increasing sources automatically reset each period to cumulative-from-period-start; live measurements remain direct traces. The editor allows a deliberate override.
+- Initial limits keep the visual readable: two to seven day/week overlays, or two to five month/year overlays. Grid guides, fixed axes, unit/decimals and data-source controls reuse the existing Chart fine tuning.
+
+**Validation:** Card Lab covers a detailed today/yesterday solar overlay and a three-month statistics-backed temperature overlay. Still verify local day/week/month/year boundaries and sparse earlier periods on a live HA instance.
+
+### Experimental: distribution landscape / ridgeline history
+
+**Reference:** The BBC/ERA5 visualisation shared during planning is retained only as a private design reference. Do not publish it in the README, repository, or release assets; replace it with an original Card Lab fixture or original diagram before public documentation. It illustrates a stacked density (ridgeline) view: each historical period is a distribution rather than a simple trace, and the mound moves as the underlying conditions change.
+
+**Why it is experimental:** this is meaningfully different from the compact line, column, and daily-total charts. It needs statistical bucketing, clear baseline language, and considerably more vertical room to remain honest and legible. It may ultimately merit a dedicated card; it belongs here first because the Chart profile now has the source selection, history adapter, responsive SVG foundation, and appearance controls needed to test it carefully.
+
+#### Proposed stages
+
+1. **One-period distribution:** for a numeric measurement, group one day of hourly readings into value buckets around a declared reference (initially that period's arithmetic mean). Render a single calm above/below distribution with no decorative gradient. Make the reference and units explicit.
+2. **Thirty-day landscape:** stack one daily distribution per row, oldest to newest, with a shared horizontal value scale. Default to a tower/stacked card layout because it needs enough height; do not squeeze it into an insight slot.
+3. **Colour and emphasis:** introduce an optional restrained cold-to-warm gradient across each mound, centred on the declared reference. Preserve a monochrome/default version, keep labels and accessibility independent of colour, and never use colour to imply a threshold that was not configured.
+
+#### Data and interaction rules
+
+- Start with hourly buckets for the preceding 7–30 days. Statistics are the automatic data source; raw Recorder history is an explicit, bounded override for short detail views only.
+- Support temperature, humidity, power, air quality, and other numeric measurements only when the value unit is consistent across the range. Total-increasing entities require a separate derived/delta treatment and are out of scope initially.
+- Let users choose the reference carefully: per-period average (initial), displayed-range average, or an explicit numeric reference. Label the choice visibly—“above/below average” is not meaningful without saying which average.
+- Offer bin count/smoothing only as advanced controls with conservative defaults. Preserve the real distribution; do not fabricate continuity from sparse values.
+- A tap should open normal entity more-info. Detailed bucket tooltips, comparison of selected days, and multi-entity landscapes are deferred.
+
+#### Done when
+
+A user can select one compatible entity, see a trustworthy stacked view of how its daily hourly distribution has shifted over the last month, understand the reference line and units at a glance, and fall back calmly when Recorder statistics are insufficient.
 
 ### Functional single-entity card (exploration)
 

@@ -2,8 +2,8 @@ import { LitElement, css, html, nothing, svg, type PropertyValues } from "lit";
 import { dispatchHassAction, type ActionTrigger } from "./actions";
 import { areaEntityIds } from "./area-index";
 import { resolveAreaReference, resolvedAreaId } from "./area-reference";
-import { bucketPoints, fetchChartHistory, fetchMultiChartHistory, liveNumericState, rangeMilliseconds, type ChartHistory, type MultiChartHistory } from "./chart-data";
-import { chartGeometry, multiChartGeometry } from "./chart-geometry";
+import { bucketPoints, fetchChartHistory, fetchComparisonChartHistory, fetchMultiChartHistory, fetchOverlayChartHistory, liveNumericState, overlayPeriodHours, overlayPeriodLimit, rangeMilliseconds, type ChartHistory, type ChartPoint, type ComparisonChartHistory, type MultiChartHistory, type OverlayChartHistory } from "./chart-data";
+import { chartGeometry, comparisonChartGeometry, multiChartGeometry, overlayChartGeometry } from "./chart-geometry";
 import { PRESETS, presetMetric } from "./presets";
 import type { ActionConfig, AreaGlanceConfig, AreaReference, AreaSignal, ChartConfig, ChartSeriesConfig, ChartType, EntityState, HassLike, MetricConfig, MetricPreset, StatusConfig } from "./types";
 
@@ -537,6 +537,8 @@ export class AreaGlanceCard extends LitElement {
   private _energyPreferencesRequest?: Promise<void>;
   private _chartHistory?: ChartHistory;
   private _multiChartHistory?: MultiChartHistory[];
+  private _comparisonChartHistory?: ComparisonChartHistory;
+  private _overlayChartHistory?: OverlayChartHistory;
   private _chartKey?: string;
   private _chartRequest = 0;
   /** Distinguish a genuinely empty recorder response from the first in-flight request. */
@@ -562,7 +564,7 @@ export class AreaGlanceCard extends LitElement {
   private _showcaseHasExplicitMetrics = false;
 
   static get properties() {
-    return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true }, _towerIconMode: { state: true }, _chartHistory: { state: true }, _multiChartHistory: { state: true }, _chartLoading: { state: true }, _chartPlotWidth: { state: true } };
+    return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true }, _towerIconMode: { state: true }, _chartHistory: { state: true }, _multiChartHistory: { state: true }, _comparisonChartHistory: { state: true }, _overlayChartHistory: { state: true }, _chartLoading: { state: true }, _chartPlotWidth: { state: true } };
   }
 
   static getConfigElement() {
@@ -775,9 +777,20 @@ export class AreaGlanceCard extends LitElement {
     return JSON.stringify({ chart, source: this._chartSource(chart) });
   }
 
+  private _chartRefreshDelay(chart: ChartConfig): number {
+    const overlay = chart.type === "period_overlay";
+    const overlayHours = overlay
+      ? overlayPeriodHours(chart.overlay_period ?? "day", Math.max(2, Math.min(overlayPeriodLimit(chart.overlay_period ?? "day"), Math.round(chart.overlay_count ?? 4))))
+      : 0;
+    const hours = overlayHours || rangeMilliseconds(chart.range, chart.type ?? "line", chart.hours_to_show) / 3_600_000;
+    return hours <= 48 ? 5 * 60_000 : 15 * 60_000;
+  }
+
   private _ensureChartHistory(force = false) {
     if (this._config?.profile !== "chart" || !this.hass) return;
     const multi = this._config.chart?.type === "multi_line";
+    const comparison = this._config.chart?.type === "comparison";
+    const overlay = this._config.chart?.type === "period_overlay";
     if (!multi && !this._config.chart?.entity && !this._energyPreferencesLoaded) {
       this._chartLoading = true;
       this.requestUpdate();
@@ -785,7 +798,7 @@ export class AreaGlanceCard extends LitElement {
     }
     const key = this._chartCacheKey();
     const keyChanged = this._chartKey !== key;
-    if (!force && this._chartKey === key && (multi ? this._multiChartHistory : this._chartHistory)) return;
+    if (!force && this._chartKey === key && (overlay ? this._overlayChartHistory : comparison ? this._comparisonChartHistory : multi ? this._multiChartHistory : this._chartHistory)) return;
     if (keyChanged && this._chartRetryTimer !== undefined) {
       window.clearTimeout(this._chartRetryTimer);
       this._chartRetryTimer = undefined;
@@ -798,14 +811,18 @@ export class AreaGlanceCard extends LitElement {
     this._chartLoading = true;
     // Keep an established plot visible while its periodic refresh is in flight,
     // but never let a previous source masquerade as the newly chosen one.
-    if (keyChanged) { this._chartHistory = undefined; this._multiChartHistory = undefined; }
+    if (keyChanged) { this._chartHistory = undefined; this._multiChartHistory = undefined; this._comparisonChartHistory = undefined; this._overlayChartHistory = undefined; }
     const requestHistory = multi
       ? fetchMultiChartHistory(this.hass, chart).then((histories) => ({ points: histories.flatMap((history) => history.points), unit: histories[0]?.unit, sourceEntity: histories[0]?.entity, multi: histories }))
+      : comparison ? fetchComparisonChartHistory(this.hass, chart, source.entity).then((comparisonHistory) => ({ points: comparisonHistory.current.points, unit: comparisonHistory.current.unit, sourceEntity: comparisonHistory.current.sourceEntity, comparison: comparisonHistory }))
+      : overlay ? fetchOverlayChartHistory(this.hass, chart, source.entity).then((overlayHistory) => ({ points: overlayHistory.series.at(-1)?.points ?? [], unit: overlayHistory.unit, sourceEntity: overlayHistory.sourceEntity, overlay: overlayHistory }))
       : fetchChartHistory(this.hass, chart, source);
     requestHistory.then((history) => {
       if (request !== this._chartRequest || this._chartKey !== key) return;
       this._chartHistory = { points: history.points, unit: history.unit, sourceEntity: history.sourceEntity };
       this._multiChartHistory = "multi" in history && Array.isArray(history.multi) ? history.multi as MultiChartHistory[] : undefined;
+      this._comparisonChartHistory = "comparison" in history ? history.comparison as ComparisonChartHistory : undefined;
+      this._overlayChartHistory = "overlay" in history ? history.overlay as OverlayChartHistory : undefined;
       // Recorder can briefly answer an empty history query while Home Assistant
       // is still bringing the dashboard connection up. Retry that one initial
       // response automatically; a settled empty result remains honest.
@@ -820,8 +837,7 @@ export class AreaGlanceCard extends LitElement {
       }
       this.requestUpdate();
       if (this._chartRefreshTimer !== undefined) window.clearTimeout(this._chartRefreshTimer);
-      const refresh = rangeMilliseconds(chart.range, chart.type ?? "line", chart.hours_to_show) <= 48 * 3_600_000 ? 5 * 60_000 : 15 * 60_000;
-      this._chartRefreshTimer = window.setTimeout(() => this._ensureChartHistory(true), refresh);
+      this._chartRefreshTimer = window.setTimeout(() => this._ensureChartHistory(true), this._chartRefreshDelay(chart));
     });
   }
 
@@ -899,27 +915,41 @@ export class AreaGlanceCard extends LitElement {
     return source.entity ? this._entityName(source.entity) : "Chart";
   }
 
+  /** A deliberately small set of meaningful summary values for a plotted series. */
+  private _chartSeriesValue(points: ChartPoint[], statistic: ChartConfig["summary_statistic"] = "auto"): number | undefined {
+    if (!points.length) return undefined;
+    if (statistic === "first") return points[0].value;
+    if (statistic === "min") return Math.min(...points.map((point) => point.value));
+    if (statistic === "max") return Math.max(...points.map((point) => point.value));
+    if (statistic === "mean") return points.reduce((sum, point) => sum + point.value, 0) / points.length;
+    return points.at(-1)?.value;
+  }
+
+  private _formatChartValue(value: number | undefined, unit: string, chart = this._config?.chart ?? {}): string {
+    if (value === undefined) return "Unavailable";
+    const decimals = chart.decimals ?? (unit === "W" || unit === "%" ? 0 : 1);
+    return `${value.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit ? ` ${unit}` : ""}`;
+  }
+
   private _chartSummary(history: ChartHistory): string {
     const chart = this._config?.chart ?? {};
     if (chart.summary) return chart.summary;
-    const live = this._chartLiveValue(chart);
+    const statistic = chart.summary_statistic ?? "auto";
+    const live = statistic === "auto" ? this._chartLiveValue(chart) : undefined;
     if (live !== undefined) {
       const source = this._chartSource(chart);
       const liveUnit = source.entity
         ? String(this.hass?.states[source.entity]?.attributes.unit_of_measurement ?? "")
         : source.importEntity ? String(this.hass?.states[source.importEntity]?.attributes.unit_of_measurement ?? "") : "";
-      const unit = chart.unit ?? liveUnit;
-      const decimals = chart.decimals ?? (unit === "W" || unit === "%" ? 0 : 1);
-      return `${live.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit ? ` ${unit}` : ""}`;
+      return this._formatChartValue(live, chart.unit ?? liveUnit, chart);
     }
     const points = history.points;
     if (!points.length) return this._chartLoading ? "Loading history…" : "History unavailable";
     // A daily-total chart's header answers "what is today so far?"; the bars
     // already provide the historical context, so do not sum the displayed range.
-    const value = chart.type === "daily_totals" ? points.at(-1)!.value : this._chartLiveValue(chart) ?? points.at(-1)!.value;
+    const value = chart.type === "daily_totals" ? points.at(-1)!.value : this._chartSeriesValue(points, statistic);
     const unit = chart.unit ?? history.unit ?? "";
-    const decimals = chart.decimals ?? (unit === "W" || unit === "%" ? 0 : 1);
-    return `${value.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit ? ` ${unit}` : ""}`;
+    return this._formatChartValue(value, unit, chart);
   }
 
   private _chartHours(chart = this._config?.chart ?? {}): number {
@@ -955,10 +985,11 @@ export class AreaGlanceCard extends LitElement {
     const histories = this._multiChartLiveHistories();
     return html`<span class="chart-legend">${this._chartSeries(chart).map((series, index) => {
       const history = histories.find((item) => item.entity === series.entity);
-      const live = liveNumericState(this.hass?.states[series.entity]) ?? history?.points.at(-1)?.value;
+      const live = chart.summary_statistic && chart.summary_statistic !== "auto"
+        ? this._chartSeriesValue(history?.points ?? [], chart.summary_statistic)
+        : liveNumericState(this.hass?.states[series.entity]) ?? history?.points.at(-1)?.value;
       const unit = chart.unit ?? history?.unit ?? String(this.hass?.states[series.entity]?.attributes.unit_of_measurement ?? "");
-      const decimals = chart.decimals ?? (unit === "W" || unit === "%" ? 0 : 1);
-      const value = live === undefined ? "Unavailable" : `${live.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals })}${unit ? ` ${unit}` : ""}`;
+      const value = this._formatChartValue(live, unit, chart);
       return html`<span class="chart-legend-item" style=${`--chart-series-colour:${this._seriesColour(index, series)}`}><span class="chart-legend-swatch"></span><span class="chart-legend-label">${series.label || this._entityName(series.entity)}</span><span class="chart-legend-value">${value}</span></span>`;
     })}</span>`;
   }
@@ -1048,7 +1079,7 @@ export class AreaGlanceCard extends LitElement {
     const margin = { left: 18, right: 8, top: 13, bottom: 26 };
     const plotWidth = Math.max(120, svgWidth - margin.left - margin.right);
     const plotHeight = svgHeight - margin.top - margin.bottom;
-    const geometry = multiChartGeometry(histories.map((history) => history.points), plotWidth, plotHeight, { start, end }, display, { min: chart.axis_min, max: chart.axis_max });
+    const geometry = multiChartGeometry(histories.map((history) => history.points), plotWidth, plotHeight, { start, end }, display, { min: chart.axis_min, max: chart.axis_max }, display === "overlap" && chart.line_style === "stepped");
     if (!geometry) return html`<div class="chart-empty">${this._chartLoading ? "Loading historyâ€¦" : "History unavailable"}</div>`;
     const formatAxis = (value: number) => Math.abs(value) >= 1000 ? `${Math.round(value / 1000)}k` : Math.round(value).toLocaleString(undefined, { maximumFractionDigits: 0, useGrouping: false });
     const ticks = this._chartTimeTicks("multi_line", chart.range, start, end, plotWidth);
@@ -1075,10 +1106,116 @@ export class AreaGlanceCard extends LitElement {
     </svg>`;
   }
 
+  private _comparisonLabel(period: NonNullable<ChartConfig["comparison_period"]>) {
+    return ({ day: "Today / yesterday", week: "This week / last week", month: "This month / last month", year: "This year / last year" } as const)[period];
+  }
+
+  private _renderComparisonLegend() {
+    const chart = this._config?.chart ?? {};
+    const history = this._comparisonHistoryWithLive();
+    const unit = chart.unit ?? history?.current.unit ?? "";
+    const value = (points?: ChartHistory["points"]) => this._formatChartValue(this._chartSeriesValue(points ?? [], chart.summary_statistic), unit, chart);
+    return html`<span class="chart-legend"><span class="chart-legend-item" style=${`--chart-series-colour:${chart.comparison_current_color ?? "#e85d20"}`}><span class="chart-legend-swatch"></span><span class="chart-legend-label">Current</span><span class="chart-legend-value">${value(history?.current.points)}</span></span><span class="chart-legend-item" style=${`--chart-series-colour:${chart.comparison_previous_color ?? "#9ca3af"}`}><span class="chart-legend-swatch"></span><span class="chart-legend-label">Previous</span><span class="chart-legend-value">${value(history?.previous.points)}</span></span></span>`;
+  }
+
+  /**
+   * Long-term statistics commonly end at the last completed bucket. Keep a
+   * live measurement visible at the true current position so an in-progress
+   * month does not look empty until Recorder rolls its next daily statistic.
+   */
+  private _comparisonHistoryWithLive(): ComparisonChartHistory | undefined {
+    const history = this._comparisonChartHistory;
+    if (!history || history.mode === "cumulative") return history;
+    const live = this._chartLiveValue(this._config?.chart ?? {});
+    if (live === undefined) return history;
+    const now = Date.now();
+    const current = history.current.points.filter((point) => point.time < now);
+    return { ...history, current: { ...history.current, points: [...current, { time: now, value: live }] } };
+  }
+
+  private _renderComparisonChart() {
+    const chart = this._config?.chart ?? {};
+    const history = this._comparisonHistoryWithLive();
+    if (!history || (!history.current.points.length && !history.previous.points.length)) return html`<div class="chart-empty">${this._chartLoading ? "Loading history…" : "History unavailable"}</div>`;
+    const svgWidth = this._chartPlotWidth, svgHeight = this._chartPlotHeight;
+    const margin = { left: 18, right: 8, top: 13, bottom: 26 };
+    const plotWidth = Math.max(120, svgWidth - margin.left - margin.right), plotHeight = svgHeight - margin.top - margin.bottom;
+    // The shared x-axis represents the complete calendar period. Today's
+    // line intentionally stops at "now" instead of stretching to 24:00.
+    const geometry = comparisonChartGeometry(history.current.points, history.previous.points, plotWidth, plotHeight, {
+      ...history,
+      currentEnd: history.currentStart + (history.previousEnd - history.previousStart),
+    }, { min: chart.axis_min, max: chart.axis_max }, chart.line_style === "stepped");
+    if (!geometry) return html`<div class="chart-empty">History unavailable</div>`;
+    const axis = (value: number) => Math.abs(value) >= 1000 ? `${Math.round(value / 1000)}k` : Math.round(value).toLocaleString(undefined, { useGrouping: false });
+    const period = chart.comparison_period ?? "day";
+    const labels = period === "day" ? ["00", "12", "24"] : period === "week" ? ["Mon", "Thu", "Sun"] : period === "month" ? ["1", "15", "31"] : ["Jan", "Jul", "Dec"];
+    const ticks = labels.map((label, index) => ({ label, x: plotWidth * index / 2, anchor: index === 0 ? "start" : index === 2 ? "end" : "middle" }));
+    const scaleTicks = [{ value: geometry.max, y: 5 }, { value: (geometry.min + geometry.max) / 2, y: plotHeight / 2 + 4 }, { value: geometry.min, y: plotHeight - 2 }];
+    const grid = chart.grid_lines ?? "none";
+    const currentColour = chart.comparison_current_color ?? "#e85d20", previousColour = chart.comparison_previous_color ?? "#9ca3af";
+    const unit = chart.unit ?? history.current.unit ?? "";
+    return svg`<svg class="chart-svg" width=${svgWidth} height=${svgHeight} viewBox=${`0 0 ${svgWidth} ${svgHeight}`} role="img" aria-label=${`${this._chartTitle()} period comparison`} preserveAspectRatio="xMinYMid meet"><g transform=${`translate(${margin.left} ${margin.top})`}>
+      ${grid === "y" || grid === "both" ? scaleTicks.slice(0, -1).map((tick) => svg`<line class="chart-grid" x1="0" y1=${Math.max(0, tick.y - 4)} x2=${plotWidth} y2=${Math.max(0, tick.y - 4)}></line>`) : nothing}
+      ${grid === "x" || grid === "both" ? ticks.slice(1, -1).map((tick) => svg`<line class="chart-grid" x1=${tick.x} y1="0" x2=${tick.x} y2=${plotHeight}></line>`) : nothing}
+      <line class="chart-axis chart-y-axis" x1="0" y1="0" x2="0" y2=${plotHeight}></line><line class="chart-axis" x1="0" y1=${plotHeight} x2=${plotWidth} y2=${plotHeight}></line>
+      <path class="chart-line multi" style=${`stroke:${previousColour}`} d=${geometry.previousPath}></path><path class="chart-line multi" style=${`stroke:${currentColour}`} d=${geometry.currentPath}></path>
+      ${scaleTicks.map((tick) => svg`<text class="chart-scale" x="-7" y=${tick.y} text-anchor="end">${axis(tick.value)}</text>`)}
+      ${unit ? svg`<text class="chart-unit" x=${plotWidth} y="5" text-anchor="end">${unit}</text>` : nothing}
+      ${ticks.map((tick) => svg`<text class="chart-tick" x=${tick.x} y=${plotHeight + 20} text-anchor=${tick.anchor}>${tick.label}</text>`)}
+    </g></svg>`;
+  }
+
+  private _overlayLabel(period: NonNullable<ChartConfig["overlay_period"]>, count: number) {
+    const unit = ({ day: "day", week: "week", month: "month", year: "year" } as const)[period];
+    return `${count} ${unit}${count === 1 ? "" : "s"} overlaid`;
+  }
+
+  private _renderOverlayLegend() {
+    const chart = this._config?.chart ?? {};
+    const history = this._overlayChartHistory;
+    const count = history?.series.length ?? Math.max(2, Number(chart.overlay_count ?? 4));
+    const unit = chart.unit ?? history?.unit ?? "";
+    const value = this._formatChartValue(this._chartSeriesValue(history?.series.at(-1)?.points ?? [], chart.summary_statistic), unit, chart);
+    return html`<span class="chart-legend"><span class="chart-legend-item" style=${`--chart-series-colour:${chart.overlay_current_color ?? "#e85d20"}`}><span class="chart-legend-swatch"></span><span class="chart-legend-label">Current</span><span class="chart-legend-value">${value}</span></span><span class="chart-legend-item" style=${`--chart-series-colour:${chart.overlay_history_color ?? "#9ca3af"}`}><span class="chart-legend-swatch"></span><span class="chart-legend-label">${count - 1} previous</span></span></span>`;
+  }
+
+  private _renderOverlayChart() {
+    const chart = this._config?.chart ?? {};
+    const history = this._overlayChartHistory;
+    if (!history || !history.series.some((item) => item.points.length)) return html`<div class="chart-empty">${this._chartLoading ? "Loading history…" : "History unavailable"}</div>`;
+    const svgWidth = this._chartPlotWidth, svgHeight = this._chartPlotHeight;
+    const margin = { left: 18, right: 8, top: 13, bottom: 26 };
+    const plotWidth = Math.max(120, svgWidth - margin.left - margin.right), plotHeight = svgHeight - margin.top - margin.bottom;
+    const previousWindow = history.series.at(-2);
+    const fullPeriodDuration = previousWindow ? previousWindow.end - previousWindow.start : undefined;
+    const geometry = overlayChartGeometry(history.series, plotWidth, plotHeight, { min: chart.axis_min, max: chart.axis_max }, fullPeriodDuration, chart.line_style === "stepped");
+    if (!geometry) return html`<div class="chart-empty">History unavailable</div>`;
+    const axis = (value: number) => Math.abs(value) >= 1000 ? `${Math.round(value / 1000)}k` : Math.round(value).toLocaleString(undefined, { useGrouping: false });
+    const period = chart.overlay_period ?? "day";
+    const labels = period === "day" ? ["00", "12", "24"] : period === "week" ? ["Mon", "Thu", "Sun"] : period === "month" ? ["1", "15", "31"] : ["Jan", "Jul", "Dec"];
+    const ticks = labels.map((label, index) => ({ label, x: plotWidth * index / 2, anchor: index === 0 ? "start" : index === 2 ? "end" : "middle" }));
+    const scaleTicks = [{ value: geometry.max, y: 5 }, { value: (geometry.min + geometry.max) / 2, y: plotHeight / 2 + 4 }, { value: geometry.min, y: plotHeight - 2 }];
+    const grid = chart.grid_lines ?? "none", current = chart.overlay_current_color ?? "#e85d20", historic = chart.overlay_history_color ?? "#9ca3af";
+    const oldestOpacity = Math.max(0.08, Math.min(1, Number(chart.overlay_fade ?? 24) / 100));
+    const unit = chart.unit ?? history.unit ?? "";
+    return svg`<svg class="chart-svg" width=${svgWidth} height=${svgHeight} viewBox=${`0 0 ${svgWidth} ${svgHeight}`} role="img" aria-label=${`${this._chartTitle()} period overlay`} preserveAspectRatio="xMinYMid meet"><g transform=${`translate(${margin.left} ${margin.top})`}>
+      ${grid === "y" || grid === "both" ? scaleTicks.slice(0, -1).map((tick) => svg`<line class="chart-grid" x1="0" y1=${Math.max(0, tick.y - 4)} x2=${plotWidth} y2=${Math.max(0, tick.y - 4)}></line>`) : nothing}
+      ${grid === "x" || grid === "both" ? ticks.slice(1, -1).map((tick) => svg`<line class="chart-grid" x1=${tick.x} y1="0" x2=${tick.x} y2=${plotHeight}></line>`) : nothing}
+      <line class="chart-axis chart-y-axis" x1="0" y1="0" x2="0" y2=${plotHeight}></line><line class="chart-axis" x1="0" y1=${plotHeight} x2=${plotWidth} y2=${plotHeight}></line>
+      ${geometry.paths.map((path, index) => { const isCurrent = index === geometry.paths.length - 1; const opacity = isCurrent ? 1 : oldestOpacity + (1 - oldestOpacity) * (index / Math.max(1, geometry.paths.length - 2)) * .65; return path ? svg`<path class="chart-line multi" style=${`stroke:${isCurrent ? current : historic};opacity:${opacity}`} d=${path}></path>` : nothing; })}
+      ${scaleTicks.map((tick) => svg`<text class="chart-scale" x="-7" y=${tick.y} text-anchor="end">${axis(tick.value)}</text>`)}
+      ${unit ? svg`<text class="chart-unit" x=${plotWidth} y="5" text-anchor="end">${unit}</text>` : nothing}
+      ${ticks.map((tick) => svg`<text class="chart-tick" x=${tick.x} y=${plotHeight + 20} text-anchor=${tick.anchor}>${tick.label}</text>`)}
+    </g></svg>`;
+  }
+
   private _renderChart() {
     const chart = this._config?.chart ?? {};
     const type = chart.type ?? "line";
     if (type === "multi_line") return this._renderMultiChart();
+    if (type === "comparison") return this._renderComparisonChart();
+    if (type === "period_overlay") return this._renderOverlayChart();
     // `area` remains a supported legacy type; the editor now presents one
     // continuous chart with a simple filled/unfilled display choice.
     const filled = type === "area" || (type === "line" && chart.show_area !== false);
@@ -1111,7 +1248,7 @@ export class AreaGlanceCard extends LitElement {
     const margin = { left: 18, right: 8, top: 13, bottom: 26 };
     const plotWidth = Math.max(120, svgWidth - margin.left - margin.right);
     const plotHeight = svgHeight - margin.top - margin.bottom;
-    const geometry = chartGeometry(points, type, plotWidth, plotHeight, { start, end }, filled, { min: chart.axis_min, max: chart.axis_max });
+    const geometry = chartGeometry(points, type, plotWidth, plotHeight, { start, end }, filled, { min: chart.axis_min, max: chart.axis_max }, chart.line_style === "stepped");
     const unit = chart.unit ?? history.unit ?? "";
     if (!geometry) return html`<div class="chart-empty">${this._chartLoading ? "Loading history…" : "History unavailable"}</div>`;
     // Axis labels are intentionally terse. With the unit already in the
@@ -2277,9 +2414,11 @@ export class AreaGlanceCard extends LitElement {
       const chartStacked = this._config.layout === "stacked";
       const chartHeaderAlignment = chartStacked ? this._config.header_alignment ?? "left" : "left";
       const multiChart = this._config.chart?.type === "multi_line";
+      const comparisonChart = this._config.chart?.type === "comparison";
+      const overlayChart = this._config.chart?.type === "period_overlay";
       const dashboardDark = this.hass?.themes?.darkMode === true;
       return html`<ha-card class=${`chart-card ${dashboardDark ? "dashboard-dark" : ""} ${surface.theme === "dark" ? "force-dark" : surface.theme === "light" ? "force-light" : ""}${textWeight !== "bold" ? ` ${textWeight}-weight` : ""}${shadowMode === "none" ? " no-shadow" : shadowMode === "inner" ? " inner-shadow" : ""}`} style=${`${this._appearanceStyle(background)}${this._shadowStyle()}${this._layoutStyle(0)}`}>
-        <section class=${`chart-layout${chartStacked ? " stacked" : ""}${multiChart ? " multi-chart-layout" : ""}`}><div class=${`chart-summary summary align-${chartHeaderAlignment}`} style=${`--area-glance-title-fit:${titleFit}`}><span class=${`title ${titleLines}`}>${chartTitle}</span>${multiChart && !explicitStatus?.line ? this._renderMultiLegend() : html`<span class="chart-value">${explicitStatus?.line ?? this._chartSummary(history)}</span>`}<span class="chart-range">${explicitStatus?.age ?? this._chartHeaderRange(history)}</span></div><button class="chart-plot" aria-label=${`Open ${chartTitle} details`} @click=${this._chartClicked}>${this._renderChart()}</button></section>
+        <section class=${`chart-layout${chartStacked ? " stacked" : ""}${multiChart || comparisonChart || overlayChart ? " multi-chart-layout" : ""}`}><div class=${`chart-summary summary align-${chartHeaderAlignment}`} style=${`--area-glance-title-fit:${titleFit}`}><span class=${`title ${titleLines}`}>${chartTitle}</span>${(multiChart || comparisonChart || overlayChart) && !explicitStatus?.line ? (comparisonChart ? this._renderComparisonLegend() : overlayChart ? this._renderOverlayLegend() : this._renderMultiLegend()) : html`<span class="chart-value">${explicitStatus?.line ?? this._chartSummary(history)}</span>`}<span class="chart-range">${explicitStatus?.age ?? (comparisonChart ? this._comparisonLabel(this._config.chart?.comparison_period ?? "day") : overlayChart ? this._overlayLabel(this._config.chart?.overlay_period ?? "day", this._overlayChartHistory?.series.length ?? Math.max(2, Number(this._config.chart?.overlay_count ?? 4))) : this._chartHeaderRange(history))}</span></div><button class="chart-plot" aria-label=${`Open ${chartTitle} details`} @click=${this._chartClicked}>${this._renderChart()}</button></section>
       </ha-card>${this._renderChartContributorSheet()}`;
     }
     const status = this._status();
@@ -2596,6 +2735,17 @@ export class AreaGlanceCardEditor extends LitElement {
     if (changed.has("hass")) this._loadChartEnergyPreferences();
   }
 
+  protected updated() {
+    // The compact template deliberately keeps the overlay editor on one line.
+    // Set the contextual native-number limit after render so it cannot silently
+    // disagree with the data-layer limit when a user changes the period type.
+    if (this._config.profile !== "chart" || this._config.chart?.type !== "period_overlay") return;
+    const input = Array.from(this.renderRoot.querySelectorAll<HTMLInputElement>('input[type="number"]'))
+      .find((candidate) => candidate.closest("label")?.textContent?.includes("Periods to overlay"));
+    if (!input) return;
+    input.max = String(overlayPeriodLimit(this._config.chart.overlay_period ?? "day"));
+  }
+
   private _loadChartEnergyPreferences() {
     if (!this.hass?.callWS || this._chartEnergyPreferencesLoaded || this._chartEnergyPreferencesRequest) return;
     this._chartEnergyPreferencesRequest = loadSharedEnergyPreferences(this.hass)
@@ -2732,6 +2882,15 @@ export class AreaGlanceCardEditor extends LitElement {
     // loaded. Committing a generic sensor here would make the eventual Grid
     // preference look like a late, surprising change.
     if (!this._chartEnergyPreferencesLoaded) return { entity: undefined, energy_source: undefined };
+    // A period comparison is deliberately one real entity. It cannot honestly
+    // compare the synthetic import-minus-export Grid series, so resolve a
+    // concrete Energy Dashboard sensor where possible and otherwise use the
+    // same metadata-ranked power candidate as a normal line chart.
+    if (type === "comparison" || type === "period_overlay") {
+      const solar = resolveEnergyChartSource(this._chartEnergyPreferences, this.hass, "solar").entity;
+      const battery = resolveEnergyChartSource(this._chartEnergyPreferences, this.hass, "battery_power").entity;
+      return { entity: solar ?? battery ?? this._chartCandidate("line"), energy_source: undefined };
+    }
     const energy_source = suggestedEnergyChartSource(this._chartEnergyPreferences, this.hass, type);
     if (energy_source) {
       const resolved = resolveEnergyChartSource(this._chartEnergyPreferences, this.hass, energy_source);
@@ -2794,12 +2953,13 @@ export class AreaGlanceCardEditor extends LitElement {
     const unitMismatch = this._editorSeriesUnitMismatch(series);
     const allNonNegative = series.every((item) => (liveNumericState(this.hass?.states[item.entity]) ?? 0) >= 0);
     return html`<section class="insights chart-editor"><h3>Chart</h3><p class="hint">Choose up to three compatible sensors. Each is shown as a line with a matching legend entry.</p>
-      <label>Chart type<select .value="multi_line" @change=${(event: Event) => { const next = (event.target as HTMLSelectElement).value as Exclude<ChartType, "area">; if (next !== "multi_line") this._chartChanged({ type: next, ...this._chartSuggestion(next), entities: undefined, multi_display: undefined, hours_to_show: next === "daily_totals" ? 168 : 24, range: undefined }); }}><option value="line">Line (single entity)</option><option value="multi_line">Line (multiple entities)</option><option value="columns">Columns</option><option value="daily_totals">Daily totals</option></select></label>
+      <label>Chart type<select .value="multi_line" @change=${(event: Event) => { const next = (event.target as HTMLSelectElement).value as Exclude<ChartType, "area">; if (next !== "multi_line") this._chartChanged({ type: next, ...this._chartSuggestion(next), entities: undefined, multi_display: undefined, hours_to_show: next === "daily_totals" ? 168 : undefined, range: undefined, ...(next === "period_overlay" ? { overlay_period: "day", overlay_count: 4, overlay_mode: "auto" } : {}) }); }}><option value="line">Line (single entity)</option><option value="multi_line">Line (multiple entities)</option><option value="comparison">Period comparison</option><option value="period_overlay">Period overlay</option><option value="columns">Columns</option><option value="daily_totals">Daily totals</option></select></label>
       <label>History to show (hours)<input type="number" min="1" max="720" step="1" .value=${String(hours)} @change=${this._chartDurationChanged}></label><p class="slot-hint">Any whole number from 1 hour to 30 days.</p>
       <label>Lines</label>${series.map((item, index) => html`<div class="multi-series-row"><ha-entity-picker .hass=${this.hass} .value=${item.entity} .label=${`Line ${index + 1}`} allow-custom-entity @value-changed=${(event: Event) => this._multiSeriesEntityChanged(index, event)}></ha-entity-picker><input class="series-colour" aria-label=${`Line ${index + 1} colour`} type="color" .value=${this._editorSeriesColour(index, item)} @input=${(event: Event) => this._multiSeriesChanged(series.map((current, itemIndex) => itemIndex === index ? { ...current, color: (event.target as HTMLInputElement).value } : current))}><button class="icon-button" aria-label=${`Remove line ${index + 1}`} @click=${() => this._multiSeriesChanged(series.filter((_, itemIndex) => itemIndex !== index))}>×</button><input class="series-label" .value=${item.label ?? ""} placeholder="Legend label (optional)" @input=${(event: Event) => this._multiSeriesChanged(series.map((current, itemIndex) => itemIndex === index ? { ...current, label: (event.target as HTMLInputElement).value || undefined } : current))}></div>`)}
       ${series.length < 3 ? html`<button class="add-insight" @click=${this._addMultiSeries}>Add line</button>` : nothing}${unitMismatch ? html`<p class="editor-warning">${unitMismatch}</p>` : nothing}
       <details class="more-options"><summary>Fine tuning (optional)</summary>
         <label>Display<select .value=${chart.multi_display ?? "overlap"} @change=${(event: Event) => this._multiSeriesChanged(series, { multi_display: (event.target as HTMLSelectElement).value as "overlap" | "stacked" })}><option value="overlap">Overlapping lines (default)</option><option value="stacked" ?disabled=${Boolean(unitMismatch) || !allNonNegative}>Stacked areas</option></select></label><p class="slot-hint">Stacked areas are available only for compatible non-negative readings. Overlap keeps every line independent.</p>
+        ${chart.multi_display !== "stacked" ? html`<label>Line style<select .value=${chart.line_style ?? "straight"} @change=${(event: Event) => this._multiSeriesChanged(series, { line_style: (event.target as HTMLSelectElement).value as "straight" | "stepped" })}><option value="straight">Straight (default)</option><option value="stepped">Stepped</option></select></label><p class="slot-hint">Stepped lines hold each reading until the next change. They suit discrete sensor states and targets.</p>` : nothing}
         <label>Grid lines<select .value=${chart.grid_lines ?? "none"} @change=${(event: Event) => this._multiSeriesChanged(series, { grid_lines: (event.target as HTMLSelectElement).value as NonNullable<ChartConfig["grid_lines"]> })}><option value="none">None (default)</option><option value="x">Vertical, time guides</option><option value="y">Horizontal, value guides</option><option value="both">Both axes</option></select></label><p class="slot-hint">Faint guides align to the visible time and value-axis labels, behind the lines.</p>
         <div class="two"><label>Value-axis minimum<input type="number" step="any" .value=${chart.axis_min?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._multiSeriesChanged(series, { axis_min: value === "" ? undefined : Number(value) }); }}></label><label>Value-axis maximum<input type="number" step="any" .value=${chart.axis_max?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._multiSeriesChanged(series, { axis_max: value === "" ? undefined : Number(value) }); }}></label></div>
         <div class="two"><label>Decimals<input type="number" min="0" max="4" .value=${chart.decimals?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._multiSeriesChanged(series, { decimals: value === "" ? undefined : Number(value) }); }}></label><label>Unit override<input .value=${chart.unit ?? ""} placeholder="Home Assistant unit" @input=${(event: Event) => this._multiSeriesChanged(series, { unit: (event.target as HTMLInputElement).value || undefined })}></label></div>
@@ -2813,19 +2973,24 @@ export class AreaGlanceCardEditor extends LitElement {
     const energySuggestion = this._chartEnergyPreferencesLoaded ? suggestedEnergyChartSource(this._chartEnergyPreferences, this.hass, type) : undefined;
     const hasEnergyDashboard = Boolean(this._chartEnergyPreferences?.energy_sources?.length);
     const sourceHint = chart.energy_source ? `Using ${chart.energy_source.replaceAll("_", " ")} from Energy Dashboard` : chart.entity ? `Using ${this._entityName(chart.entity)}` : !this._chartEnergyPreferencesLoaded ? "Checking Energy Dashboard sources…" : energySuggestion ? `Starting with ${energySuggestion.replaceAll("_", " ")} from Energy Dashboard` : hasEnergyDashboard && suggested ? `Energy Dashboard is configured, but it has no compatible live source for this chart. Starting with ${this._entityName(suggested)}.` : suggested ? `No Energy Dashboard sources are configured. Starting with ${this._entityName(suggested)}.` : hasEnergyDashboard ? "Energy Dashboard is configured, but choose a compatible sensor to chart." : "Choose a sensor to chart";
-    const typeHint: Record<Exclude<ChartType, "area">, string> = { line: "One continuous sensor history", multi_line: "Up to three compatible sensor histories", columns: "Hourly signed or interval readings", daily_totals: "Daily total-increasing sensor deltas" };
+    const typeHint: Record<Exclude<ChartType, "area">, string> = { line: "One continuous sensor history", multi_line: "Up to three compatible sensor histories", comparison: "Current calendar period against the preceding equivalent period", period_overlay: "Current period plus several earlier equivalents on one shared axis", columns: "Hourly signed or interval readings", daily_totals: "Daily total-increasing sensor deltas" };
     const hours = chart.hours_to_show ?? (rangeMilliseconds(chart.range, type) / 3_600_000);
     const daily = type === "daily_totals";
+    const overlayLimit = overlayPeriodLimit(chart.overlay_period ?? "day");
     if (type === "multi_line") return this._renderMultiChartEditor(chart, hours);
     return html`<section class="insights chart-editor"><h3>Chart</h3><p class="hint">Start with a useful whole-home source, or choose exactly what you want to chart.</p>
-      <label>Chart type<select .value=${type} @change=${(event: Event) => { const next = (event.target as HTMLSelectElement).value as Exclude<ChartType, "area">; if (next === "multi_line") { const startingEntity = chart.entity ?? this._chartCandidate("line"); this._chartChanged({ type: next, entity: undefined, energy_source: undefined, entities: chart.entities?.length ? chart.entities : startingEntity ? [{ entity: startingEntity }] : [], multi_display: chart.multi_display ?? "overlap", hours_to_show: 24, range: undefined }); } else { this._chartChanged({ type: next, ...this._chartSuggestion(next), entities: undefined, multi_display: undefined, hours_to_show: next === "daily_totals" ? 168 : 24, range: undefined }); } }}><option value="line">Line (single entity)</option><option value="multi_line">Line (multiple entities)</option><option value="columns">Columns</option><option value="daily_totals">Daily totals</option></select></label><p class="slot-hint">${typeHint[type]}</p>
-      <label>${daily ? "Days to show" : "History to show (hours)"}<input type="number" min=${daily ? "2" : "1"} max=${daily ? "30" : "720"} step="1" .value=${String(daily ? Math.max(1, Math.round(hours / 24)) : hours)} @change=${this._chartDurationChanged}></label><p class="slot-hint">${daily ? "Daily totals are grouped by calendar day, up to 30 days." : "Any whole number from 1 hour to 30 days."}</p>
+      <label>Chart type<select .value=${type} @change=${(event: Event) => { const next = (event.target as HTMLSelectElement).value as Exclude<ChartType, "area">; if (next === "multi_line") { const startingEntity = chart.entity ?? this._chartCandidate("line"); this._chartChanged({ type: next, entity: undefined, energy_source: undefined, entities: chart.entities?.length ? chart.entities : startingEntity ? [{ entity: startingEntity }] : [], multi_display: chart.multi_display ?? "overlap", hours_to_show: 24, range: undefined }); } else { this._chartChanged({ type: next, ...this._chartSuggestion(next), entities: undefined, multi_display: undefined, hours_to_show: next === "daily_totals" ? 168 : undefined, range: undefined, ...(next === "period_overlay" ? { overlay_period: "day", overlay_count: 4, overlay_mode: "auto" } : {}) }); } }}><option value="line">Line (single entity)</option><option value="multi_line">Line (multiple entities)</option><option value="comparison">Period comparison</option><option value="period_overlay">Period overlay</option><option value="columns">Columns</option><option value="daily_totals">Daily totals</option></select></label><p class="slot-hint">${typeHint[type]}</p>
+      ${type === "comparison" ? html`<label>Compare<select .value=${chart.comparison_period ?? "day"} @change=${(event: Event) => this._chartChanged({ comparison_period: (event.target as HTMLSelectElement).value as NonNullable<ChartConfig["comparison_period"]> })}><option value="day">Today vs yesterday</option><option value="week">This week vs last week</option><option value="month">This month vs last month</option><option value="year">This year vs last year</option></select></label><p class="slot-hint">Current is orange; the preceding equivalent period is neutral grey.</p>` : type === "period_overlay" ? html`<label>Overlay periods<select .value=${chart.overlay_period ?? "day"} @change=${(event: Event) => this._chartChanged({ overlay_period: (event.target as HTMLSelectElement).value as NonNullable<ChartConfig["overlay_period"]> })}><option value="day">Days, aligned 00:00–24:00</option><option value="week">Weeks, aligned Monday–Sunday</option><option value="month">Months, aligned by day</option><option value="year">Years, aligned Jan–Dec</option></select></label><label>Periods to overlay (includes current)<input type="number" min="2" max=${(chart.overlay_period ?? "day") === "day" || (chart.overlay_period ?? "day") === "week" ? "7" : "5"} step="1" .value=${String(chart.overlay_count ?? 4)} @change=${(event: Event) => this._chartChanged({ overlay_count: Number((event.target as HTMLInputElement).value) })}></label><p class="slot-hint">Current is orange. Earlier periods progressively fade so the recent shape remains clear.</p>` : html`<label>${daily ? "Days to show" : "History to show (hours)"}<input type="number" min=${daily ? "2" : "1"} max=${daily ? "30" : "720"} step="1" .value=${String(daily ? Math.max(1, Math.round(hours / 24)) : hours)} @change=${this._chartDurationChanged}></label><p class="slot-hint">${daily ? "Daily totals are grouped by calendar day, up to 30 days." : "Any whole number from 1 hour to 30 days."}</p>`}
+      ${type === "period_overlay" ? html`<p class="slot-hint">Compact overlay limits: 31 days, 12 weeks, 12 months, or 5 years. Denser 30–365-day distributions are planned as a dedicated landscape chart.</p>` : nothing}
       <label>Suggested source</label><p class="contributor-hint">${sourceHint}${!chart.energy_source && suggested ? " — matched from compatible Home Assistant sensors" : ""}</p>
       <ha-entity-picker .hass=${this.hass} .value=${chart.entity ?? ""} .label="Use another entity" allow-custom-entity @value-changed=${(event: Event) => this._chartChanged({ entity: this._pickerValue(event), energy_source: undefined })}></ha-entity-picker>
-      ${type !== "daily_totals" ? html`<label>Or use Energy Dashboard<select .value=${chart.energy_source ?? ""} @change=${this._chartEnergySourceChanged}><option value="">Direct entity (recommended)</option>${type === "columns" || type === "line" ? html`<option value="grid">Grid import / export</option>` : nothing}<option value="solar">Solar generation</option><option value="battery_soc">Battery charge</option><option value="battery_power">Battery flow</option></select></label>` : nothing}
+      ${type !== "daily_totals" && type !== "comparison" ? html`<label>Or use Energy Dashboard<select .value=${chart.energy_source ?? ""} @change=${this._chartEnergySourceChanged}><option value="">Direct entity (recommended)</option>${type === "columns" || type === "line" ? html`<option value="grid">Grid import / export</option>` : nothing}<option value="solar">Solar generation</option><option value="battery_soc">Battery charge</option><option value="battery_power">Battery flow</option></select></label>` : nothing}
       <details class="more-options"><summary>Fine tuning (optional)</summary>
+        ${type === "comparison" ? html`<label>Data treatment<select .value=${chart.comparison_mode ?? "auto"} @change=${(event: Event) => this._chartChanged({ comparison_mode: (event.target as HTMLSelectElement).value as NonNullable<ChartConfig["comparison_mode"]> })}><option value="auto">Automatic (recommended)</option><option value="live">Live readings</option><option value="cumulative">Cumulative total</option></select></label><div class="two"><label>Current colour<input type="color" .value=${chart.comparison_current_color ?? "#e85d20"} @input=${(event: Event) => this._chartChanged({ comparison_current_color: (event.target as HTMLInputElement).value })}></label><label>Previous colour<input type="color" .value=${chart.comparison_previous_color ?? "#9ca3af"} @input=${(event: Event) => this._chartChanged({ comparison_previous_color: (event.target as HTMLInputElement).value })}></label></div>` : nothing}
+        ${type === "period_overlay" ? html`<label>Data treatment<select .value=${chart.overlay_mode ?? "auto"} @change=${(event: Event) => this._chartChanged({ overlay_mode: (event.target as HTMLSelectElement).value as NonNullable<ChartConfig["overlay_mode"]> })}><option value="auto">Automatic (recommended)</option><option value="live">Live readings</option><option value="cumulative">Cumulative from period start</option></select></label><div class="two"><label>Current colour<input type="color" .value=${chart.overlay_current_color ?? "#e85d20"} @input=${(event: Event) => this._chartChanged({ overlay_current_color: (event.target as HTMLInputElement).value })}></label><label>Previous colour<input type="color" .value=${chart.overlay_history_color ?? "#9ca3af"} @input=${(event: Event) => this._chartChanged({ overlay_history_color: (event.target as HTMLInputElement).value })}></label></div><label>Oldest-trace opacity<input type="range" min="8" max="80" step="4" .value=${String(chart.overlay_fade ?? 24)} @input=${(event: Event) => this._chartChanged({ overlay_fade: Number((event.target as HTMLInputElement).value) })}><span class="range-value">${chart.overlay_fade ?? 24}%</span></label><p class="slot-hint">Newer historical traces become clearer toward the current period.</p>` : nothing}
         ${type === "line" ? html`<label class="checkbox"><input type="checkbox" .checked=${chart.show_area !== false} @change=${(event: Event) => this._chartChanged({ show_area: (event.target as HTMLInputElement).checked })}> Fill beneath the line</label><p class="slot-hint">A filled chart is the default. Turn it off for a lighter, unfilled line.</p>` : nothing}
-        ${type === "line" ? html`<label>Grid lines<select .value=${chart.grid_lines ?? "none"} @change=${(event: Event) => this._chartChanged({ grid_lines: (event.target as HTMLSelectElement).value as NonNullable<ChartConfig["grid_lines"]> })}><option value="none">None (default)</option><option value="x">Vertical, time guides</option><option value="y">Horizontal, value guides</option><option value="both">Both axes</option></select></label><p class="slot-hint">Faint guides align to the visible time and value-axis labels, behind the line.</p>` : nothing}
+        ${type === "line" || type === "comparison" || type === "period_overlay" ? html`<label>Line style<select .value=${chart.line_style ?? "straight"} @change=${(event: Event) => this._chartChanged({ line_style: (event.target as HTMLSelectElement).value as "straight" | "stepped" })}><option value="straight">Straight (default)</option><option value="stepped">Stepped</option></select></label><p class="slot-hint">Stepped lines hold each reading until the next change. They suit discrete sensor states and targets.</p>` : nothing}
+        ${type === "line" || type === "comparison" || type === "period_overlay" ? html`<label>Grid lines<select .value=${chart.grid_lines ?? "none"} @change=${(event: Event) => this._chartChanged({ grid_lines: (event.target as HTMLSelectElement).value as NonNullable<ChartConfig["grid_lines"]> })}><option value="none">None (default)</option><option value="x">Vertical, time guides</option><option value="y">Horizontal, value guides</option><option value="both">Both axes</option></select></label><p class="slot-hint">Faint guides align to the visible time and value-axis labels, behind the line.</p>` : nothing}
         ${type === "line" || type === "columns" ? html`<div class="two"><label>Positive colour<input type="color" .value=${chart.positive_color ?? "#263238"} @input=${(event: Event) => this._chartChanged({ positive_color: (event.target as HTMLInputElement).value })}></label><label>Negative / export colour<input type="color" .value=${chart.negative_color ?? "#e85d20"} @input=${(event: Event) => this._chartChanged({ negative_color: (event.target as HTMLInputElement).value })}></label></div><p class="slot-hint">Orange marks values below zero, such as grid export. Leave the defaults for the restrained chart style.</p>` : nothing}
         ${daily ? html`<div class="three"><label>Primary colour<input type="color" .value=${chart.daily_primary_color ?? "#6b7280"} @input=${(event: Event) => this._chartChanged({ daily_primary_color: (event.target as HTMLInputElement).value })}></label><label>Weekend colour<input type="color" .value=${chart.weekend_color ?? "#4f555b"} @input=${(event: Event) => this._chartChanged({ weekend_color: (event.target as HTMLInputElement).value })}></label><label>Today colour<input type="color" .value=${chart.today_color ?? "#e85d20"} @input=${(event: Event) => this._chartChanged({ today_color: (event.target as HTMLInputElement).value })}></label></div><p class="slot-hint">Weekends are darker than completed weekdays. Today is highlighted because it is incomplete.</p>` : nothing}
         ${type === "columns" || daily ? html`<label>Bar opacity<input type="range" min="20" max="100" step="5" .value=${String(chart.bar_opacity ?? 100)} @input=${(event: Event) => this._chartChanged({ bar_opacity: Number((event.target as HTMLInputElement).value) })}><span class="range-value">${chart.bar_opacity ?? 100}%</span></label><p class="slot-hint">Solid bars are the default. Lower this only when you want a lighter visual treatment.</p>` : nothing}
@@ -2834,7 +2999,8 @@ export class AreaGlanceCardEditor extends LitElement {
         ${daily ? html`<label class="checkbox"><input type="checkbox" .checked=${chart.daily_week_dividers === true} @change=${(event: Event) => this._chartChanged({ daily_week_dividers: (event.target as HTMLInputElement).checked })}> Show week dividers</label>${chart.daily_week_dividers ? html`<label>Week starts on<select .value=${chart.week_start ?? (chart.week_end === "saturday" ? "sunday" : "monday")} @change=${(event: Event) => this._chartChanged({ week_start: (event.target as HTMLSelectElement).value as "monday" | "sunday", week_end: undefined })}><option value="monday">Monday (default)</option><option value="sunday">Sunday</option></select></label><p class="slot-hint">A faint divider is drawn at the end of each calendar week, behind the bars.</p>` : nothing}` : nothing}
         <div class="two"><label>Value-axis minimum<input type="number" step="any" .value=${chart.axis_min?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._chartChanged({ axis_min: value === "" ? undefined : Number(value) }); }}></label><label>Value-axis maximum<input type="number" step="any" .value=${chart.axis_max?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._chartChanged({ axis_max: value === "" ? undefined : Number(value) }); }}></label></div><p class="slot-hint">Optional fixed limits for the plotted values. Leave both blank to keep the automatic scale.</p>
         <div class="two"><label>Decimals<input type="number" min="0" max="4" .value=${chart.decimals?.toString() ?? ""} placeholder="Automatic" @input=${(event: Event) => { const value = (event.target as HTMLInputElement).value; this._chartChanged({ decimals: value === "" ? undefined : Number(value) }); }}></label><label>Unit override<input .value=${chart.unit ?? ""} placeholder="Home Assistant unit" @input=${(event: Event) => this._chartChanged({ unit: (event.target as HTMLInputElement).value || undefined })}></label></div>
-        <label>Data source<select .value=${chart.history_source ?? "auto"} @change=${(event: Event) => this._chartChanged({ history_source: (event.target as HTMLSelectElement).value as ChartConfig["history_source"] })}><option value="auto">Automatic</option><option value="raw">Recorder history</option><option value="statistics">Long-term statistics</option></select></label>
+        ${!daily ? html`<label>Header value<select .value=${chart.summary_statistic ?? "auto"} @change=${(event: Event) => this._chartChanged({ summary_statistic: (event.target as HTMLSelectElement).value as NonNullable<ChartConfig["summary_statistic"]> })}><option value="auto">Automatic (current reading)</option><option value="last">Last plotted value</option><option value="first">First plotted value</option><option value="min">Minimum plotted value</option><option value="max">Maximum plotted value</option><option value="mean">Average plotted value</option></select></label><p class="slot-hint">Changes the value shown in the chart header or legend, not the plotted data.</p>` : nothing}
+        <label>Data source<select .value=${chart.history_source ?? "auto"} @change=${(event: Event) => this._chartChanged({ history_source: (event.target as HTMLSelectElement).value as ChartConfig["history_source"] })}><option value="auto">Automatic</option><option value="raw">Recorder history</option><option value="statistics">Long-term statistics</option></select></label>${type === "comparison" ? html`<p class="slot-hint">Automatic keeps today detailed, then uses lightweight Recorder statistics for week, month, and year comparisons. Choose Recorder history only when a long comparison has no statistics.</p>` : type === "period_overlay" ? html`<p class="slot-hint">Automatic uses detailed history for one prior day, then bounded Recorder statistics as more or longer periods are overlaid.</p>` : nothing}
         ${type === "columns" ? html`<label>Columns show<select .value=${chart.bucket_statistic ?? "mean"} @change=${(event: Event) => this._chartChanged({ bucket_statistic: (event.target as HTMLSelectElement).value as ChartConfig["bucket_statistic"] })}><option value="mean">Hourly mean</option><option value="last">Last value</option><option value="max">Highest value</option><option value="min">Lowest value</option></select></label>` : nothing}
       </details></section>`;
   }

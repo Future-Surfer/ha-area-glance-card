@@ -55,7 +55,7 @@ export interface HassLike {
   callWS?: <T = unknown>(message: Record<string, unknown>) => Promise<T>;
 }
 
-export type ChartType = "line" | "area" | "multi_line" | "columns" | "daily_totals";
+export type ChartType = "line" | "area" | "multi_line" | "comparison" | "period_overlay" | "columns" | "daily_totals";
 
 /** One deliberately named contributor to a multi-line chart. */
 export interface ChartSeriesConfig {
@@ -69,6 +69,10 @@ export interface ChartSeriesConfig {
 /** A deliberately small, single-series chart configuration. */
 export interface ChartConfig {
   type?: ChartType;
+  /** Continuous charts join samples with straight segments by default. Stepped
+   * preserves a value until the next recorded change, which suits targets,
+   * occupancy, tariffs, and other discrete readings. */
+  line_style?: "straight" | "stepped";
   /** Continuous charts are filled by default; set false for an unfilled line. */
   show_area?: boolean;
   /** Optional restrained colours for values above/below zero. Negative values
@@ -105,6 +109,24 @@ export interface ChartConfig {
   entities?: ChartSeriesConfig[];
   /** Shared-axis line overlay or non-negative cumulative areas. */
   multi_display?: "overlap" | "stacked";
+  /** Compare the current calendar period against the preceding equivalent period. */
+  comparison_period?: "day" | "week" | "month" | "year";
+  /** Auto selects cumulative deltas for total-increasing sensors, live values otherwise. */
+  comparison_mode?: "auto" | "live" | "cumulative";
+  /** Current-period and prior-period strokes for the comparison chart. */
+  comparison_current_color?: string;
+  comparison_previous_color?: string;
+  /** Overlay several equivalent calendar periods on one shared time axis. */
+  overlay_period?: "day" | "week" | "month" | "year";
+  /** Current period plus this many older, progressively quieter traces. */
+  overlay_count?: number;
+  /** Auto selects cumulative-from-period-start for total-increasing sensors. */
+  overlay_mode?: "auto" | "live" | "cumulative";
+  /** Accent for the current trace and neutral base for historical traces. */
+  overlay_current_color?: string;
+  overlay_history_color?: string;
+  /** Opacity of the oldest historical trace, expressed as a percentage. */
+  overlay_fade?: number;
   /** Optional faint guides, aligned to the visible chart axes. */
   grid_lines?: "none" | "x" | "y" | "both";
   /** Daily-total charts can divide complete calendar weeks without a full grid. */
@@ -132,6 +154,8 @@ export interface ChartConfig {
   decimals?: number;
   unit?: string;
   title?: string;
+  /** Which plotted value is surfaced in the chart header/legend. */
+  summary_statistic?: "auto" | "first" | "last" | "min" | "max" | "mean";
   /** Overrides the automatic live/period header summary. */
   summary?: string;
 }

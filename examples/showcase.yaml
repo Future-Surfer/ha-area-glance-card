@@ -7,12 +7,14 @@
 # one specific room.
 type: vertical-stack
 cards:
+  # The baseline: one inferred room band. Its suggestions are the same ones
+  # offered when an area is selected in the visual editor.
   - type: custom:area-glance-card
     area: 1
     height: slim
-    # No metrics are specified deliberately: the numbered area receives the
-    # same initial suggestions it would receive in the visual editor.
 
+  # A light, title-above-insights treatment with a sunken surface and neutral
+  # icon defaults. Explicit per-insight colours still take priority.
   - type: custom:area-glance-card
     area: 2
     layout: stacked
@@ -21,6 +23,17 @@ cards:
       show_area_icon: true
       shadow_style: inner
       insight_icon_color: grey
+
+  # A quiet value-led variation. “Metrics only” drops the whole header and
+  # keeps its automatically inferred insight set.
+  - type: custom:area-glance-card
+    area: 3
+    layout: metrics-only
+    appearance:
+      text_weight: regular
+      show_insight_icons: false
+      shadow_style: none
+      corner_radius: 16
 
   # A grid keeps the tower at a compact half-width alongside another
   # full-height card. Tower icons are intentionally left enabled.
@@ -42,7 +55,10 @@ cards:
           energy_source: solar
           title: Solar
           hours_to_show: 24
+          grid_lines: both
 
+  # System profiles draw only from whole-home entities and Energy Dashboard
+  # sources; they never depend on the numbered room slots above.
   - type: custom:area-glance-card
     profile: house
     title: House
@@ -54,10 +70,26 @@ cards:
     profile: energy
     title: Energy
     layout: stacked
+    appearance:
+      preset: slate
+
+  - type: custom:area-glance-card
+    profile: battery
+    title: Home battery
+
+  - type: custom:area-glance-card
+    profile: security
+    title: Security
+    appearance:
+      preset: light
+      shadow_style: inner
 
   - type: custom:area-glance-card
     profile: cameras
     title: Cameras
 
   # If Solar is not configured in your Energy Dashboard, open the chart in the
-  # visual editor and select any recorded numeric entity instead.
+  # visual editor and select any recorded numeric entity instead. Direct-entity
+  # chart features (comparison, overlays, multi-line and stepped paths) are
+  # intentionally configured there because a portable YAML file cannot know
+  # another home's entity IDs.

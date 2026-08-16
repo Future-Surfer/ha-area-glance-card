@@ -13,6 +13,16 @@ export interface MultiChartGeometry {
   series: { path: string; areaPath?: string }[];
 }
 
+export interface ComparisonChartGeometry {
+  min: number; max: number;
+  currentPath: string; previousPath: string;
+}
+
+export interface OverlayChartGeometry {
+  min: number; max: number;
+  paths: string[];
+}
+
 /** A three-stop axis should read like an instrument scale, not raw recorder noise. */
 const niceStep = (value: number): number => {
   const magnitude = 10 ** Math.floor(Math.log10(Math.max(Math.abs(value), Number.EPSILON)));
@@ -21,8 +31,18 @@ const niceStep = (value: number): number => {
   return rounded * magnitude;
 };
 
+/** Build a conventional right-continuous step: the prior reading holds until
+ * the next timestamp, then changes vertically at that exact instant. */
+const linePath = (points: { x: number; y: number }[], stepped = false): string => points.map((point, index) => {
+  if (!index) return `M${point.x.toFixed(2)},${point.y.toFixed(2)}`;
+  const previous = points[index - 1];
+  return stepped
+    ? ` H${point.x.toFixed(2)} V${point.y.toFixed(2)}`
+    : ` L${point.x.toFixed(2)},${point.y.toFixed(2)}`;
+}).join("");
+
 /** Pure SVG geometry. It never changes the source values or their order. */
-export const chartGeometry = (source: ChartPoint[], type: ChartType, width: number, height: number, timeRange?: { start: number; end: number }, fillArea = false, axis?: { min?: number; max?: number }): ChartGeometry | undefined => {
+export const chartGeometry = (source: ChartPoint[], type: ChartType, width: number, height: number, timeRange?: { start: number; end: number }, fillArea = false, axis?: { min?: number; max?: number }, stepped = false): ChartGeometry | undefined => {
   if (!source.length || width <= 0 || height <= 0) return undefined;
   const values = source.map((point) => point.value);
   const hasNegative = values.some((value) => value < 0);
@@ -57,7 +77,7 @@ export const chartGeometry = (source: ChartPoint[], type: ChartType, width: numb
   const scaleY = (value: number) => height - ((value - min) / (max - min)) * height;
   const points = source.map((point) => ({ x: scaleX(point.time), y: scaleY(point.value), value: point.value, time: point.time }));
   const baseline = scaleY(0);
-  const path = points.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(" ");
+  const path = linePath(points, stepped);
   const areaPath = `${path} L${points.at(-1)!.x.toFixed(2)},${baseline.toFixed(2)} L${points[0].x.toFixed(2)},${baseline.toFixed(2)} Z`;
   const step = width / Math.max(points.length, 1);
   const bars = points.map((point) => {
@@ -89,6 +109,7 @@ export const multiChartGeometry = (
   timeRange: { start: number; end: number },
   display: "overlap" | "stacked" = "overlap",
   axis?: { min?: number; max?: number },
+  stepped = false,
 ): MultiChartGeometry | undefined => {
   if (!input.length || width <= 0 || height <= 0) return undefined;
   const series = input.map((points) => boundedSeries(points, timeRange.start, timeRange.end));
@@ -115,14 +136,66 @@ export const multiChartGeometry = (
   }
   const scaleX = (time: number) => ((time - timeRange.start) / (timeRange.end - timeRange.start)) * width;
   const scaleY = (value: number) => height - ((value - min) / (max - min)) * height;
-  const buildPath = (points: ChartPoint[]) => points.map((point, index) => `${index ? "L" : "M"}${scaleX(point.time).toFixed(2)},${scaleY(point.value).toFixed(2)}`).join(" ");
+  const buildPath = (points: ChartPoint[], steppedPath = stepped) => linePath(points.map((point) => ({ x: scaleX(point.time), y: scaleY(point.value) })), steppedPath);
   const result = series.map((points, index) => {
     if (display !== "stacked") return { path: buildPath(points) };
     const upper = timestamps.map((time) => ({ time, value: values[index][timestamps.indexOf(time)] }));
     const lower = timestamps.map((time) => ({ time, value: index ? values[index - 1][timestamps.indexOf(time)] : 0 }));
-    const path = buildPath(upper);
+    const path = buildPath(upper, false);
     const lowerPath = [...lower].reverse().map((point) => `L${scaleX(point.time).toFixed(2)},${scaleY(point.value).toFixed(2)}`).join(" ");
     return { path, areaPath: `${path} ${lowerPath} Z` };
   });
   return { min, max, baseline: scaleY(0), series: result };
+};
+
+/** Two calendar-aligned periods on one honest value axis. Each period keeps
+ * its own timestamps but is normalised to the same readable x-scale. */
+export const comparisonChartGeometry = (
+  current: ChartPoint[], previous: ChartPoint[], width: number, height: number,
+  ranges: { currentStart: number; currentEnd: number; previousStart: number; previousEnd: number },
+  axis?: { min?: number; max?: number },
+  stepped = false,
+): ComparisonChartGeometry | undefined => {
+  const series = [current, previous].filter((points) => points.length);
+  if (!series.length || width <= 0 || height <= 0) return undefined;
+  const values = series.flatMap((points) => points.map((point) => point.value));
+  let rawMin = Math.min(...values), rawMax = Math.max(...values);
+  if (rawMin === rawMax) { const pad = Math.max(Math.abs(rawMin || 1) * .12, 1); rawMin -= pad; rawMax += pad; }
+  const step = niceStep((rawMax - rawMin) / 2);
+  let min = Math.floor(rawMin / step) * step, max = Math.ceil(rawMax / step) * step;
+  if (Number.isFinite(axis?.min)) min = axis!.min!;
+  if (Number.isFinite(axis?.max)) max = axis!.max!;
+  if (min >= max) { min = rawMin; max = rawMax; }
+  const y = (value: number) => height - ((value - min) / (max - min)) * height;
+  const path = (points: ChartPoint[], start: number, end: number) => linePath(points.map((point) => {
+    const x = end === start ? width / 2 : Math.max(0, Math.min(width, ((point.time - start) / (end - start)) * width));
+    return { x, y: y(point.value) };
+  }), stepped);
+  return { min, max, currentPath: path(current, ranges.currentStart, ranges.currentEnd), previousPath: path(previous, ranges.previousStart, ranges.previousEnd) };
+};
+
+/** Multiple calendar-aligned traces, oldest first, on one truthful shared axis. */
+export const overlayChartGeometry = (
+  series: { points: ChartPoint[]; start: number; end: number }[], width: number, height: number,
+  axis?: { min?: number; max?: number }, currentPeriodDuration?: number, stepped = false,
+): OverlayChartGeometry | undefined => {
+  const visible = series.filter((item) => item.points.length);
+  if (!visible.length || width <= 0 || height <= 0) return undefined;
+  const values = visible.flatMap((item) => item.points.map((point) => point.value));
+  let rawMin = Math.min(...values), rawMax = Math.max(...values);
+  if (rawMin === rawMax) { const pad = Math.max(Math.abs(rawMin || 1) * .12, 1); rawMin -= pad; rawMax += pad; }
+  const step = niceStep((rawMax - rawMin) / 2);
+  let min = Math.floor(rawMin / step) * step, max = Math.ceil(rawMax / step) * step;
+  if (Number.isFinite(axis?.min)) min = axis!.min!;
+  if (Number.isFinite(axis?.max)) max = axis!.max!;
+  if (min >= max) { min = rawMin; max = rawMax; }
+  const y = (value: number) => height - ((value - min) / (max - min)) * height;
+  const paths = series.map((item, seriesIndex) => linePath(item.points.map((point) => {
+    // The in-progress current period must stop at its actual time position,
+    // not be stretched to impersonate a completed day/month/year.
+    const duration = seriesIndex === series.length - 1 && currentPeriodDuration ? currentPeriodDuration : item.end - item.start;
+    const x = duration <= 0 ? width / 2 : Math.max(0, Math.min(width, ((point.time - item.start) / duration) * width));
+    return { x, y: y(point.value) };
+  }), stepped));
+  return { min, max, paths };
 };
