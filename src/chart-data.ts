@@ -234,6 +234,69 @@ export const fetchMultiChartHistory = async (hass: HassLike, chart: ChartConfig,
   }));
 };
 
+/**
+ * Reconstruct a small numeric area/selected-entity aggregate from Recorder
+ * history. This intentionally shares the ordinary per-entity cache, limits
+ * contributors at the caller, and aligns data into a modest number of buckets
+ * so a compact insight never becomes a noisy or expensive full chart.
+ */
+export const fetchAggregateChartHistory = async (
+  hass: HassLike,
+  chart: ChartConfig,
+  entities: string[],
+  aggregation: "sum" | "average" | "median" | "highest" | "lowest" = "average",
+  now = Date.now(),
+): Promise<ChartHistory> => {
+  const ids = [...new Set(entities)].slice(0, 16);
+  if (!ids.length) return { points: [] };
+  const histories = await Promise.all(ids.map((entity) => fetchChartHistory(hass, { ...chart, entity, energy_source: undefined }, { entity }, now)));
+  const range = rangeMilliseconds(chart.range, chart.type ?? "line", chart.hours_to_show);
+  const end = Math.floor(now / 60_000) * 60_000;
+  const start = end - range;
+  const bucketMs = Math.max(15 * 60_000, Math.ceil(range / 56 / (15 * 60_000)) * 15 * 60_000);
+  const bucketed = histories.map((history) => bucketPoints(history.points, start, end, bucketMs, "mean"));
+  const points: ChartPoint[] = [];
+  for (let time = start + bucketMs / 2, bucket = 0; time < end; time += bucketMs, bucket++) {
+    const values = bucketed.map((series) => series[bucket]?.value).filter((value): value is number => Number.isFinite(value));
+    if (!values.length) continue;
+    const sorted = [...values].sort((a, b) => a - b);
+    const value = aggregation === "sum" ? values.reduce((total, item) => total + item, 0)
+      : aggregation === "highest" ? Math.max(...values)
+        : aggregation === "lowest" ? Math.min(...values)
+          : aggregation === "median" ? (sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2)
+            : values.reduce((total, item) => total + item, 0) / values.length;
+    points.push({ time, value });
+  }
+  return { points, unit: histories.find((history) => history.unit)?.unit, sourceEntity: ids[0] };
+};
+
+/** Count active binary/device states over time for compact signal trends. */
+export const fetchActiveCountHistory = async (hass: HassLike, entities: string[], range: ChartConfig["range"], now = Date.now()): Promise<ChartHistory> => {
+  if (!hass.callApi || !entities.length) return { points: [] };
+  const end = Math.floor(now / 60_000) * 60_000;
+  const start = end - rangeMilliseconds(range, "line");
+  const ids = [...new Set(entities)].slice(0, 24);
+  try {
+    const result = await hass.callApi<unknown>("GET", historyPath(new Date(start), new Date(end), ids));
+    const collections = Array.isArray(result) ? result : [];
+    const histories = ids.map((_, index) => ((Array.isArray(collections[index]) ? collections[index] : [])
+      .map((row: any) => ({ time: timestamp(row?.last_changed ?? row?.last_updated), active: ["on", "open", "unlocked", "home", "true"].includes(String(row?.state ?? "").toLowerCase()) }))
+      .filter((item: { time?: number }): item is { time: number; active: boolean } => item.time !== undefined)
+      .sort((left, right) => left.time - right.time)));
+    const bucketMs = Math.max(15 * 60_000, Math.ceil((end - start) / 56 / (15 * 60_000)) * 15 * 60_000);
+    const points: ChartPoint[] = [];
+    for (let time = start + bucketMs / 2; time < end; time += bucketMs) {
+      let active = 0; let available = 0;
+      histories.forEach((history) => {
+        const state = history.filter((point) => point.time <= time).at(-1);
+        if (state) { available++; if (state.active) active++; }
+      });
+      if (available) points.push({ time, value: active });
+    }
+    return { points, unit: "" };
+  } catch { return { points: [] }; }
+};
+
 const calendarPeriod = (now: Date, period: NonNullable<ChartConfig["comparison_period"]>) => {
   const end = new Date(now);
   const start = new Date(now);

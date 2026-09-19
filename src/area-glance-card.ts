@@ -1,11 +1,12 @@
 import { LitElement, css, html, nothing, svg, type PropertyValues } from "lit";
+import { keyed } from "lit/directives/keyed.js";
 import { dispatchHassAction, type ActionTrigger } from "./actions";
 import { areaEntityIds } from "./area-index";
 import { resolveAreaReference, resolvedAreaId } from "./area-reference";
-import { bucketPoints, fetchChartHistory, fetchComparisonChartHistory, fetchMultiChartHistory, fetchOverlayChartHistory, liveNumericState, overlayPeriodHours, overlayPeriodLimit, rangeMilliseconds, type ChartHistory, type ChartPoint, type ComparisonChartHistory, type MultiChartHistory, type OverlayChartHistory } from "./chart-data";
+import { bucketPoints, fetchActiveCountHistory, fetchAggregateChartHistory, fetchChartHistory, fetchComparisonChartHistory, fetchMultiChartHistory, fetchOverlayChartHistory, liveNumericState, overlayPeriodHours, overlayPeriodLimit, rangeMilliseconds, type ChartHistory, type ChartPoint, type ComparisonChartHistory, type MultiChartHistory, type OverlayChartHistory } from "./chart-data";
 import { chartGeometry, comparisonChartGeometry, multiChartGeometry, overlayChartGeometry } from "./chart-geometry";
 import { PRESETS, presetMetric } from "./presets";
-import type { ActionConfig, AreaGlanceConfig, AreaReference, AreaSignal, ChartConfig, ChartSeriesConfig, ChartType, EntityState, HassLike, MetricConfig, MetricPreset, StatusConfig } from "./types";
+import type { ActionConfig, AreaGlanceConfig, AreaReference, AreaSignal, ChartConfig, ChartSeriesConfig, ChartType, EntityState, HassLike, MetricConfig, MetricPreset, MiniChartConfig, StatusConfig } from "./types";
 
 const UNAVAILABLE = new Set(["unknown", "unavailable", "none", ""]);
 const DEFAULT_METRICS = [presetMetric("temperature"), presetMetric("lights"), presetMetric("power"), presetMetric("device")];
@@ -22,6 +23,14 @@ const DEFAULT_BATTERY_METRICS: MetricConfig[] = [
   { ...presetMetric("power"), energy_source: "battery_power", label: "Battery flow", icon: "mdi:battery-charging-medium" },
   { ...presetMetric("power"), energy_source: "solar", label: "Solar", icon: "mdi:solar-power-variant" },
   { ...presetMetric("power"), energy_source: "grid", label: "Grid", icon: "mdi:transmission-tower" },
+];
+/** A deliberately varied, Energy Dashboard-backed introduction to compact
+ * insight trends. Each slot remains an ordinary, editable insight afterwards. */
+const DEFAULT_MINI_CHART_METRICS: MetricConfig[] = [
+  { ...presetMetric("power"), energy_source: "grid", label: "Grid", icon: "mdi:transmission-tower", mini_chart: { type: "line", range: "24h", show_baseline: true } },
+  { ...presetMetric("power"), energy_source: "solar", label: "Solar", icon: "mdi:solar-power-variant", mini_chart: { type: "area", range: "24h", fill_opacity: 18 } },
+  { ...presetMetric("power"), energy_source: "battery_power", label: "Battery flow", icon: "mdi:battery-charging-medium", mini_chart: { type: "columns", range: "24h", show_baseline: true } },
+  { ...presetMetric("battery"), energy_source: "battery_soc", label: "Charge", mini_chart: { type: "line", range: "7d", line_style: "stepped" } },
 ];
 /**
  * A few integrations expose one physical camera as Clear/Fluent, Main/Sub or
@@ -71,6 +80,7 @@ const defaultMetricsForProfile = (profile: AreaGlanceConfig["profile"], hass?: H
   if (profile === "security") return DEFAULT_SECURITY_METRICS;
   if (profile === "energy") return DEFAULT_ENERGY_METRICS;
   if (profile === "battery") return DEFAULT_BATTERY_METRICS;
+  if (profile === "mini_charts") return DEFAULT_MINI_CHART_METRICS.map((metric) => ({ ...metric, mini_chart: { ...metric.mini_chart } }));
   if (profile === "cameras") {
     const metrics = cameraProfileMetrics(hass);
     return metrics.length ? metrics : [presetMetric("camera")];
@@ -373,6 +383,20 @@ interface EnergySourcePreference {
   flow_to?: EnergyFlowPreference[];
 }
 
+interface MiniChartState {
+  key: string;
+  history?: ChartHistory;
+  comparison?: ComparisonChartHistory;
+  loading: boolean;
+}
+
+type DisplayedToggle = {
+  entityId: string;
+  action: ActionConfig;
+  trigger: ActionTrigger;
+  isOn: boolean;
+};
+
 interface EnergyFlowPreference {
   stat_rate?: string;
   stat_rate_from?: string;
@@ -544,6 +568,11 @@ export class AreaGlanceCard extends LitElement {
   /** Distinguish a genuinely empty recorder response from the first in-flight request. */
   private _chartLoading = false;
   private _chartRefreshTimer?: number;
+  private _miniChartRefreshTimer?: number;
+  /** History results for compact insight trends. Keys include the source and
+   * presentation so reorder/resize never lets one slot borrow another's data. */
+  private _miniChartHistory = new Map<string, MiniChartState>();
+  private _miniChartVersion = 0;
   private _chartRetryTimer?: number;
   private _chartRetriedKey?: string;
   private _clockTimer?: number;
@@ -555,16 +584,19 @@ export class AreaGlanceCard extends LitElement {
   /** Prevent zero-line clip paths from colliding when several charts share a dashboard. */
   private _chartSvgId = `area-glance-chart-${Math.random().toString(36).slice(2)}`;
   private _towerIconMode: "normal" | "compact" | "hidden" = "normal";
+  /** Direct controls stay visibly busy until HA publishes a changed state (or a short safety timeout expires). */
+  private _inlineControlPending = new Map<string, string>();
   private _metricGesture?: { pointerId: number; metric: MetricConfig; display: MetricDisplay; startX: number; startY: number; held: boolean; timer?: number };
   private _pendingMetricTap?: { metric: MetricConfig; display: MetricDisplay; timer: number };
   private _ignoreMetricClick = false;
+  private _metricClickSuppressionTimer?: number;
   /** Numeric showcase slots have no fixed room definition, so their initial
    * suggestions wait until HA has supplied the resolved area's live entities. */
   private _showcaseSuggestionsKey?: string;
   private _showcaseHasExplicitMetrics = false;
 
   static get properties() {
-    return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true }, _towerIconMode: { state: true }, _chartHistory: { state: true }, _multiChartHistory: { state: true }, _comparisonChartHistory: { state: true }, _overlayChartHistory: { state: true }, _chartLoading: { state: true }, _chartPlotWidth: { state: true } };
+    return { hass: { attribute: false }, _config: { state: true }, _detail: { state: true }, _towerIconMode: { state: true }, _inlineControlPending: { state: true }, _chartHistory: { state: true }, _multiChartHistory: { state: true }, _comparisonChartHistory: { state: true }, _overlayChartHistory: { state: true }, _chartLoading: { state: true }, _chartPlotWidth: { state: true }, _miniChartVersion: { state: true } };
   }
 
   static getConfigElement() {
@@ -576,8 +608,8 @@ export class AreaGlanceCard extends LitElement {
   }
 
   public setConfig(config: AreaGlanceConfig): void {
-    if (!config || (!config.title && !config.area && !["house", "security", "energy", "battery", "cameras", "chart"].includes(config.profile ?? "") && config.layout !== "metrics-only")) {
-      throw new Error("Set a title, choose an area, use a Home, Energy, Home battery, Security, Cameras, or Chart profile, or use Metrics only.");
+    if (!config || (!config.title && !config.area && !["house", "security", "energy", "battery", "cameras", "mini_charts", "chart"].includes(config.profile ?? "") && config.layout !== "metrics-only")) {
+      throw new Error("Set a title, choose an area, use a Home, Energy, Home battery, Security, Cameras, Mini Charts, or Chart profile, or use Metrics only.");
     }
     this._showcaseSuggestionsKey = undefined;
     this._showcaseHasExplicitMetrics = Array.isArray(config.metrics);
@@ -590,6 +622,7 @@ export class AreaGlanceCard extends LitElement {
     };
     this._loadEnergyPreferences();
     this._ensureChartHistory();
+    this._ensureMiniChartHistory();
   }
 
   private _heightOption() { return HEIGHT_OPTIONS[this._config?.height ?? "slim"]; }
@@ -661,7 +694,11 @@ export class AreaGlanceCard extends LitElement {
     // Charts deliberately occupy roughly two bands, while remaining honest to
     // the shared card-height choice used by every other layout.
     if (this._config?.profile === "chart") return height.rows * (this._config.layout === "stacked" ? 2.45 : 2);
-    if (this._config?.layout === "tower") return Math.max(3.5, 1.2 + (this._effectiveMetrics().filter((metric) => !metric.hidden).length || 1) * 1.15);
+    if (this._config?.layout === "tower") {
+      const metrics = this._effectiveMetrics().filter((metric) => !metric.hidden);
+      const miniCharts = metrics.filter((metric) => metric.mini_chart).length;
+      return Math.max(3.5, 1.2 + (metrics.length || 1) * 1.15 + miniCharts * .65);
+    }
     return this._config?.layout === "stacked" ? height.stackedRows : height.rows;
   }
 
@@ -695,12 +732,14 @@ export class AreaGlanceCard extends LitElement {
     this._clockTimer = window.setInterval(() => this.requestUpdate(), 30000);
     this._resizeObserver = new ResizeObserver(() => { this._syncTowerIconMode(); this._syncChartPlotSize(); });
     this._resizeObserver.observe(this);
+    this._ensureMiniChartHistory();
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     if (this._clockTimer !== undefined) window.clearInterval(this._clockTimer);
     if (this._chartRefreshTimer !== undefined) window.clearTimeout(this._chartRefreshTimer);
+    if (this._miniChartRefreshTimer !== undefined) window.clearTimeout(this._miniChartRefreshTimer);
     if (this._chartRetryTimer !== undefined) window.clearTimeout(this._chartRetryTimer);
     this._clockTimer = undefined;
     this._resizeObserver?.disconnect();
@@ -708,6 +747,9 @@ export class AreaGlanceCard extends LitElement {
     this._cancelMetricGesture();
     if (this._pendingMetricTap) window.clearTimeout(this._pendingMetricTap.timer);
     this._pendingMetricTap = undefined;
+    if (this._metricClickSuppressionTimer) window.clearTimeout(this._metricClickSuppressionTimer);
+    this._metricClickSuppressionTimer = undefined;
+    this._ignoreMetricClick = false;
   }
 
   protected willUpdate(changed: PropertyValues<this>) {
@@ -715,12 +757,13 @@ export class AreaGlanceCard extends LitElement {
       this._applyShowcaseAreaSuggestions();
       this._loadEnergyPreferences();
       this._ensureChartHistory();
+      this._ensureMiniChartHistory();
       this.requestUpdate();
     }
   }
 
   private _loadEnergyPreferences() {
-    if (!["energy", "battery", "chart"].includes(this._config?.profile ?? "") || !this.hass?.callWS || this._energyPreferencesLoaded || this._energyPreferencesRequest) return;
+    if (!["energy", "battery", "mini_charts", "chart"].includes(this._config?.profile ?? "") || !this.hass?.callWS || this._energyPreferencesLoaded || this._energyPreferencesRequest) return;
     this._energyPreferencesRequest = loadSharedEnergyPreferences(this.hass)
       .then((preferences) => {
         this._energyPreferences = preferences;
@@ -729,6 +772,7 @@ export class AreaGlanceCard extends LitElement {
         this._energyPreferencesLoaded = true;
         this._energyPreferencesRequest = undefined;
         this._ensureChartHistory(true);
+        this._ensureMiniChartHistory(true);
         this.requestUpdate();
       });
   }
@@ -748,6 +792,114 @@ export class AreaGlanceCard extends LitElement {
     // ranking would otherwise briefly select (for example) a temperature sensor.
     if (!this._energyPreferencesLoaded) return {};
     return { entity: this._suggestChartEntity(chart.type ?? "line") };
+  }
+
+  /** Mini charts deliberately only accept a source whose own history HA can
+   * return. An area aggregate remains a live summary, not a fabricated trace. */
+  private _miniChartAggregateEntities(metric: MetricConfig): string[] {
+    const preset = metric.preset ?? "custom";
+    const source = this._metricSource(metric, preset);
+    if (source === "entity" || metric.energy_source || AREA_SIGNAL_PRESETS.has(preset) || preset === "lights" || preset === "attention") return [];
+    const candidates = source === "entities"
+      ? metric.entities ?? []
+      : includedEntityIds(metric, this._aggregateEntityIds(metric, preset, metric.area ?? this._config?.area));
+    // Only numeric, recorder-friendly measurements are eligible. A sensor's
+    // present value is the same compatibility contract used by live insights.
+    return candidates
+      .filter((entityId) => source === "entities" || isAreaMeasurement(preset, entityId, this.hass?.states[entityId]))
+      .filter((entityId) => asNumber(this.hass?.states[entityId]?.state ?? "") !== undefined)
+      .slice(0, 16);
+  }
+
+  private _miniChartSignalEntities(metric: MetricConfig): string[] {
+    const preset = metric.preset ?? "custom";
+    const source = this._metricSource(metric, preset);
+    if (!(preset === "lights" || AREA_SIGNAL_PRESETS.has(preset)) || metric.energy_source) return [];
+    const raw = source === "entities" ? metric.entities ?? [] : this._aggregateEntityIds(metric, preset, metric.area ?? this._config?.area);
+    const compatible = raw.filter((entityId) => preset === "lights" ? entityId.startsWith(`${metric.domain ?? "light"}.`) : isSignalEntity(preset as AreaSignal, entityId, this.hass?.states[entityId]));
+    return (source === "area" ? includedEntityIds(metric, compatible) : compatible).slice(0, 24);
+  }
+
+  private _miniChartSource(metric: MetricConfig): { entity?: string; importEntity?: string; exportEntity?: string; entities?: string[]; stateEntities?: string[] } {
+    if (metric.energy_source) {
+      const source = resolveEnergyChartSource(this._energyPreferences, this.hass, metric.energy_source);
+      if (source.entity || source.importEntity) return source;
+    }
+    if (this._metricSource(metric, metric.preset ?? "custom") === "entity" && metric.entity) {
+      const numeric = asNumber(this.hass?.states[metric.entity]?.state ?? "") !== undefined;
+      return numeric ? { entity: metric.entity } : { stateEntities: [metric.entity] };
+    }
+    const entities = this._miniChartAggregateEntities(metric);
+    if (entities.length) return { entities };
+    const stateEntities = this._miniChartSignalEntities(metric);
+    return stateEntities.length ? { stateEntities } : {};
+  }
+
+  private _miniChartKey(metric: MetricConfig): string | undefined {
+    const source = this._miniChartSource(metric);
+    if (!source.entity && !source.importEntity && !source.entities?.length && !source.stateEntities?.length) return undefined;
+    return JSON.stringify({ source, chart: metric.mini_chart, invert: metric.invert_value === true });
+  }
+
+  private _miniChartConfig(metric: MetricConfig): ChartConfig {
+    const mini = metric.mini_chart ?? {};
+    const range = mini.range ?? "24h";
+    const rangeHours = rangeMilliseconds(range, mini.type ?? "line") / 3_600_000;
+    return {
+      type: mini.type ?? "line",
+      range,
+      // Short trends benefit from Recorder detail. A fortnight or month of
+      // raw states is expensive and can be sparse, so automatic mode moves to
+      // Recorder statistics for a bounded, honest summary instead.
+      history_source: mini.history_source ?? (rangeHours > 48 ? "statistics" : "raw"),
+      line_style: mini.line_style,
+      show_area: mini.show_area,
+      positive_color: mini.color,
+      negative_color: mini.negative_color,
+    };
+  }
+
+  /** Fetch every visible compact trend together. The history adapter itself
+   * coalesces equal requests, so a shared Energy source still reaches HA once. */
+  private _ensureMiniChartHistory(force = false) {
+    if (!this.hass || this._config?.profile === "chart") return;
+    const sources = this._effectiveMetrics().filter((metric) => !metric.hidden && metric.mini_chart).map((metric) => ({ metric, key: this._miniChartKey(metric) })).filter((entry): entry is { metric: MetricConfig; key: string } => Boolean(entry.key));
+    const activeKeys = new Set(sources.map((entry) => entry.key));
+    for (const key of this._miniChartHistory.keys()) if (!activeKeys.has(key)) this._miniChartHistory.delete(key);
+    for (const { metric, key } of sources) {
+      const previous = this._miniChartHistory.get(key);
+      if (!force && previous && (previous.loading || previous.history)) continue;
+      this._miniChartHistory.set(key, { key, history: previous?.history, loading: true });
+      const chart = this._miniChartConfig(metric);
+      const source = this._miniChartSource(metric);
+      // A mini comparison is deliberately a direct, single-source history.
+      // Grid is a directional pair, so it keeps its truthful signed trend
+      // rather than pretending two pairs can be calendar-aligned as one.
+      const compareDays = metric.mini_chart?.comparison === "today_yesterday" && Boolean(source.entity);
+      const request: Promise<{ history: ChartHistory; comparison?: ComparisonChartHistory }> = compareDays
+        ? fetchComparisonChartHistory(this.hass, { ...chart, type: "comparison", comparison_period: "day", comparison_mode: "live" }, source.entity)
+          .then((comparison) => ({ history: comparison.current, comparison }))
+        : source.entities?.length
+          ? fetchAggregateChartHistory(this.hass, chart, source.entities, metric.aggregation ?? defaultAggregation(metric.preset ?? "temperature")).then((history) => ({ history }))
+          : source.stateEntities?.length
+            ? fetchActiveCountHistory(this.hass, source.stateEntities, chart.range).then((history) => ({ history }))
+          : fetchChartHistory(this.hass, chart, source).then((history) => ({ history }));
+      request.then(({ history, comparison }) => {
+        if (this._miniChartKey(metric) !== key) return;
+        const points = metric.invert_value ? history.points.map((point) => ({ ...point, value: -point.value })) : history.points;
+        const invertedComparison = comparison && metric.invert_value
+          ? { ...comparison, current: { ...comparison.current, points }, previous: { ...comparison.previous, points: comparison.previous.points.map((point) => ({ ...point, value: -point.value })) } }
+          : comparison;
+        this._miniChartHistory.set(key, { key, history: { ...history, points }, comparison: invertedComparison, loading: false });
+        this._miniChartVersion++;
+      }).catch(() => {
+        if (this._miniChartKey(metric) !== key) return;
+        this._miniChartHistory.set(key, { key, history: { points: [] }, loading: false });
+        this._miniChartVersion++;
+      });
+    }
+    if (this._miniChartRefreshTimer !== undefined) window.clearTimeout(this._miniChartRefreshTimer);
+    if (sources.length) this._miniChartRefreshTimer = window.setTimeout(() => this._ensureMiniChartHistory(true), 5 * 60_000);
   }
 
   /** Deliberate metadata-only source ranking. Friendly-name order only breaks a tie. */
@@ -857,6 +1009,77 @@ export class AreaGlanceCard extends LitElement {
     const now = Date.now();
     const points = [...history.points.filter((point) => now - point.time < rangeMilliseconds(chart.range, chart.type ?? "line", chart.hours_to_show)), { time: now, value: live }];
     return { ...history, points };
+  }
+
+  /** A compact insight chart intentionally has no axis text: it is a trend
+   * visual, while the normal insight label supplies the semantic context. */
+  private _renderMiniChart(metric: MetricConfig, display: MetricDisplay) {
+    const mini = metric.mini_chart;
+    const key = mini ? this._miniChartKey(metric) : undefined;
+    const state = key ? this._miniChartHistory.get(key) : undefined;
+    const history = state?.history;
+    if (!mini || !key || !history?.points.length) return nothing;
+    const type = mini.type ?? "line";
+    const now = Date.now();
+    const chart = this._miniChartConfig(metric);
+    const range = rangeMilliseconds(chart.range, type);
+    const comparison = mini.comparison === "today_yesterday" ? state?.comparison : undefined;
+    const start = comparison?.currentStart ?? now - range;
+    const end = comparison ? comparison.currentStart + (comparison.previousEnd - comparison.previousStart) : now;
+    let points = (comparison?.current.points ?? history.points).filter((point) => point.time >= start && point.time <= end);
+    // Reflect a just-published state straight away, even while the next calm
+    // history refresh is pending. It is one honest endpoint, not invented data.
+    const source = this._miniChartSource(metric);
+    const live = source.entity ? liveNumericState(this.hass?.states[source.entity]) : source.importEntity ? (liveNumericState(this.hass?.states[source.importEntity]) ?? 0) - (liveNumericState(this.hass?.states[source.exportEntity ?? ""]) ?? 0) : undefined;
+    const signedLive = live === undefined ? undefined : metric.invert_value ? -live : live;
+    if (signedLive !== undefined) points = [...points.filter((point) => point.time < now - 30_000), { time: now, value: signedLive }];
+    if (!comparison && (type === "line" || type === "area") && points.length) {
+      if (points[0].time > start) points.unshift({ time: start, value: points[0].value });
+      if (points.at(-1)!.time < now) points.push({ time: now, value: points.at(-1)!.value });
+    }
+    if (type === "columns") points = bucketPoints(points, start, end, Math.max(15 * 60_000, Math.round(range / 8)), "mean");
+    const width = 112;
+    const height = 42;
+    const padding = { top: 3, right: 2, bottom: 4, left: 2 };
+    const plotWidth = width - padding.left - padding.right;
+    const plotHeight = height - padding.top - padding.bottom;
+    const filled = type === "area" || (type === "line" && mini.show_area === true);
+    const comparisonGeometry = comparison
+      ? comparisonChartGeometry(points, comparison.previous.points, plotWidth, plotHeight, {
+        currentStart: start, currentEnd: end, previousStart: comparison.previousStart, previousEnd: comparison.previousEnd,
+      }, undefined, mini.line_style === "stepped")
+      : undefined;
+    const standardGeometry = comparison
+      ? undefined
+      : chartGeometry(points, type, plotWidth, plotHeight, { start, end }, filled, undefined, mini.line_style === "stepped");
+    if (!comparisonGeometry && !standardGeometry) return nothing;
+    const color = mini.color ?? display.color ?? "var(--area-glance-accent)";
+    const negative = mini.negative_color ?? "var(--orange-color, #e85d20)";
+    const opacity = Math.max(0, Math.min(100, Number(mini.fill_opacity ?? 18))) / 100;
+    const baseline = Math.max(0, Math.min(plotHeight, standardGeometry?.baseline ?? plotHeight));
+    const needsBaseline = Boolean(standardGeometry && (mini.show_baseline === true || type === "columns" || standardGeometry.min < 0));
+    // Each mini chart has two clipping regions. A suffix taken from the end
+    // of the JSON cache key collided for otherwise different metrics, making
+    // SVG definitions bleed between slots. Hash the full key instead.
+    const keyHash = Array.from(key).reduce((hash, character) => ((hash * 31) + character.charCodeAt(0)) >>> 0, 5381).toString(36);
+    const clipId = `${this._chartSvgId}-${keyHash}`;
+    const line = comparisonGeometry
+      ? svg`<path class="mini-chart-line comparison-previous" d=${comparisonGeometry.previousPath}></path><path class="mini-chart-line comparison-current" d=${comparisonGeometry.currentPath}></path>`
+      : filled
+      ? svg`<path class="mini-chart-fill positive" clip-path=${`url(#${clipId}-positive)`} d=${standardGeometry!.areaPath}></path><path class="mini-chart-fill negative" clip-path=${`url(#${clipId}-negative)`} d=${standardGeometry!.areaPath}></path><path class="mini-chart-line positive" clip-path=${`url(#${clipId}-positive)`} d=${standardGeometry!.path}></path><path class="mini-chart-line negative" clip-path=${`url(#${clipId}-negative)`} d=${standardGeometry!.path}></path>`
+      : svg`<path class="mini-chart-line positive" clip-path=${`url(#${clipId}-positive)`} d=${standardGeometry!.path}></path><path class="mini-chart-line negative" clip-path=${`url(#${clipId}-negative)`} d=${standardGeometry!.path}></path>`;
+    const valueDisplay = mini.value_display ?? "overlay";
+    const valuePosition = mini.value_position ?? "bottom_left";
+    const currentValue = display.value || "–";
+    const comparisonCurrent = mini.comparison_current_color ?? "#e85d20";
+    const comparisonPrevious = mini.comparison_previous_color ?? "#9ca3af";
+    const requestedLineThickness = Number(mini.line_thickness ?? 1.8);
+    const lineThickness = Number.isFinite(requestedLineThickness) ? Math.max(1, Math.min(5, requestedLineThickness)) : 1.8;
+    return html`<span class=${`mini-chart-visual value-${valueDisplay} value-position-${valuePosition}${comparison ? " comparing" : ""}`} aria-label=${`${display.label} ${comparison ? "today compared with yesterday" : type + " trend"}`} style=${`--mini-chart-positive:${color};--mini-chart-negative:${negative};--mini-chart-fill-opacity:${opacity};--mini-chart-comparison-current:${comparisonCurrent};--mini-chart-comparison-previous:${comparisonPrevious};--mini-chart-line-width:${lineThickness}px;--mini-chart-comparison-previous-width:${Math.max(1, lineThickness * .8)}px;`}>
+      ${svg`<svg viewBox=${`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img"><g transform=${`translate(${padding.left} ${padding.top})`}><defs><clipPath id=${`${clipId}-positive`}><rect x="0" y="0" width=${plotWidth} height=${baseline}></rect></clipPath><clipPath id=${`${clipId}-negative`}><rect x="0" y=${baseline} width=${plotWidth} height=${Math.max(0, plotHeight - baseline)}></rect></clipPath></defs>${needsBaseline ? svg`<line class="mini-chart-baseline" x1="0" y1=${baseline} x2=${plotWidth} y2=${baseline}></line>` : nothing}${type === "columns" ? standardGeometry!.bars.map((bar) => svg`<rect class=${`mini-chart-bar${bar.negative ? " negative" : ""}`} x=${bar.x} y=${bar.y} width=${bar.width} height=${bar.height}></rect>`) : line}</g></svg>`}
+      ${valueDisplay === "overlay" ? html`<span class="mini-chart-current">${currentValue}</span>` : nothing}
+      ${valueDisplay === "below" ? html`<span class="mini-chart-current below">${currentValue}</span>` : nothing}
+    </span>`;
   }
 
   private _chartSeries(chart = this._config?.chart ?? {}): ChartSeriesConfig[] {
@@ -1380,6 +1603,7 @@ export class AreaGlanceCard extends LitElement {
     if (profile === "energy" || profile === "battery") return "mdi:lightning-bolt-outline";
     if (profile === "security") return "mdi:shield-home-outline";
     if (profile === "cameras") return "mdi:cctv";
+    if (profile === "mini_charts") return "mdi:chart-timeline-variant";
     const name = `${title} ${this._areaName(this._config?.area) ?? ""}`.toLowerCase();
     if (/(living|lounge)/.test(name)) return "mdi:sofa-outline";
     if (/(bed|sleep)/.test(name)) return "mdi:bed-outline";
@@ -1779,7 +2003,7 @@ export class AreaGlanceCard extends LitElement {
     }
     if (preset !== "custom") color = this._thresholdColor(metric, number, color);
     if (preset === "custom") color = this._customColor(metric, state, color);
-    return { icon, color, value, label: customLabel };
+    return { icon, color, value, label: metric.label_mode === "state" ? value : customLabel };
   }
 
   private _status() {
@@ -1861,7 +2085,8 @@ export class AreaGlanceCard extends LitElement {
     };
     const chartScale = (key: "chart_x_axis" | "chart_y_axis" | "chart_bar_labels", legacyKey: "x_axis_font_size" | "y_axis_font_size" | "bar_label_font_size", base: number) =>
       textScale?.[key] === undefined ? chartLegacyScale(legacyKey, base) ?? 1 : percentage(key);
-    const contentHeight = tower ? Math.round((38 + height.metricRowHeight * Math.max(metricCount, 1)) * scale) : stacked ? height.stackedContentHeight : height.contentHeight;
+    const towerMiniCharts = tower ? this._effectiveMetrics().filter((metric) => !metric.hidden && metric.mini_chart).length : 0;
+    const contentHeight = tower ? Math.round((38 + height.metricRowHeight * Math.max(metricCount, 1) + towerMiniCharts * 36) * scale) : stacked ? height.stackedContentHeight : height.contentHeight;
     const chartHeight = Math.round(height.contentHeight * 2);
     return `${accent}--area-glance-content-height:${contentHeight}px;--area-glance-chart-height:${chartHeight}px;--area-glance-metrics-height:${height.metricRowHeight}px;--area-glance-pad-y:${Math.round(8 * scale)}px;--area-glance-pad-x:${Math.round(12 * scale)}px;--area-glance-title-size:${(1.85 * scale).toFixed(2)}rem;--area-glance-status-size:${(.95 * scale).toFixed(2)}rem;--area-glance-icon-size:${Math.round(25 * scale)}px;--area-glance-value-size:${(1.92 * scale).toFixed(2)}rem;--area-glance-label-size:${(.98 * scale).toFixed(2)}rem;--area-glance-title-scale:${percentage("title")};--area-glance-status-scale:${percentage("status")};--area-glance-value-scale:${percentage("value")};--area-glance-label-scale:${percentage("label")};--area-glance-chart-x-scale:${chartScale("chart_x_axis", "x_axis_font_size", 9)};--area-glance-chart-y-scale:${chartScale("chart_y_axis", "y_axis_font_size", 9)};--area-glance-chart-bar-scale:${chartScale("chart_bar_labels", "bar_label_font_size", 11)};--area-glance-metric-padding:${Math.max(1, Math.round(2 * scale))}px;`;
   }
@@ -1965,7 +2190,6 @@ export class AreaGlanceCard extends LitElement {
     // also keeps clicks on an otherwise inert card from producing a transient
     // "no entity provided" message.
     if (kind === "more-info" && !entity) return;
-    if (config?.confirmation && !window.confirm(config.confirmation)) return;
     if (kind === "area-details") {
       this._openAreaDetails();
       return;
@@ -2114,14 +2338,37 @@ export class AreaGlanceCard extends LitElement {
 
   private _metricClicked(metric: MetricConfig, display: MetricDisplay, event: Event) {
     event.stopPropagation();
-    if (this._ignoreMetricClick) return;
+    // Pointer gestures have already been handled by pointerup. A browser's
+    // follow-up click (including iPadOS's delayed compatibility click) must
+    // never become a second action merely because it arrived after the short
+    // click-suppression window. Keyboard and assistive-technology clicks have
+    // detail 0, so they retain the ordinary accessible fallback behaviour.
+    if (this._ignoreMetricClick || (event instanceof MouseEvent && event.detail > 0)) return;
     this._metricAction(metric, display, metric, true);
   }
-  private _suppressMetricClick() { this._ignoreMetricClick = true; window.setTimeout(() => { this._ignoreMetricClick = false; }, 0); }
+  /**
+   * Pointer gestures intentionally own tap, hold, and double-tap recognition.
+   * On touch screens the browser may emit the compatibility click *after* the
+   * pointer-up task (and after a zero-delay timer), which used to let that
+   * click dispatch a second toggle. Keep it suppressed through the short
+   * double-tap window; keyboard-initiated clicks remain handled normally.
+   */
+  private _suppressMetricClick() {
+    this._ignoreMetricClick = true;
+    if (this._metricClickSuppressionTimer) window.clearTimeout(this._metricClickSuppressionTimer);
+    this._metricClickSuppressionTimer = window.setTimeout(() => {
+      this._ignoreMetricClick = false;
+      this._metricClickSuppressionTimer = undefined;
+    }, 550);
+  }
   private _metricPointerDown(metric: MetricConfig, display: MetricDisplay, event: PointerEvent) {
     if (event.button !== 0) return;
     const target = event.currentTarget as HTMLElement;
-    target.setPointerCapture?.(event.pointerId);
+    // Pointer capture keeps a real touch gesture attached to its slot, but
+    // browsers can reject it after a cancellation or unusual compatibility
+    // sequence. The gesture itself is still valid, so never let that optional
+    // capture step abort its action handling.
+    try { target.setPointerCapture?.(event.pointerId); } catch {}
     this._metricGesture?.timer && window.clearTimeout(this._metricGesture.timer);
     const gesture: NonNullable<typeof this._metricGesture> = { pointerId: event.pointerId, metric, display, startX: event.clientX, startY: event.clientY, held: false };
     gesture.timer = window.setTimeout(() => {
@@ -2191,18 +2438,44 @@ export class AreaGlanceCard extends LitElement {
     this._closeDetail();
   }
 
-  /**
-   * The sheet intentionally offers only predictable binary controls. Rich
-   * device controls belong in Home Assistant's normal more-info dialog.
-   */
+  /** Controls used inside the aggregate detail sheet remain deliberately
+   * limited to Home Assistant's familiar binary domains. */
   private _quickControl(entityId: string): { domain: string; service: "turn_on" | "turn_off"; isOn: boolean } | undefined {
     const state = this.hass?.states[entityId];
     if (!state || UNAVAILABLE.has(state.state)) return undefined;
     const domain = entityId.split(".")[0];
     if (!domain || !["light", "switch", "fan", "input_boolean"].includes(domain)) return undefined;
     if (state.state !== "on" && state.state !== "off") return undefined;
-    const service = state.state === "on" ? "turn_off" : "turn_on";
-    return { domain, service, isOn: state.state === "on" };
+    return { domain, service: state.state === "on" ? "turn_off" : "turn_on", isOn: state.state === "on" };
+  }
+
+  /** A slot switch is only a presentation of a configured Toggle action. */
+  private _displayedToggle(metric: MetricConfig): DisplayedToggle | undefined {
+    const preference = metric.display_as_toggle;
+    // Retain old explicit toggle controls, but retire the automatic cover and
+    // lock button variants that made the editor harder to reason about.
+    const action = preference === "hold" ? metric.hold_action : preference === "tap" ? metric : metric.inline_control === "toggle" ? { ...metric, action: "toggle" as const } : undefined;
+    if (action?.action !== "toggle") return undefined;
+    const entityId = action.entity ?? metric.entity;
+    const state = entityId ? this.hass?.states[entityId] : undefined;
+    if (!entityId || !state || UNAVAILABLE.has(state.state)) return undefined;
+    return { entityId, action, trigger: preference === "hold" ? "hold" : "tap", isOn: state.state === "on" };
+  }
+
+  private _runDisplayedToggle(event: Event, metric: MetricConfig, control: DisplayedToggle) {
+    event.preventDefault();
+    event.stopPropagation();
+    const previousState = this.hass?.states[control.entityId]?.state ?? "";
+    const pending = new Map(this._inlineControlPending);
+    pending.set(control.entityId, previousState);
+    this._inlineControlPending = pending;
+    window.setTimeout(() => {
+      if (this._inlineControlPending.get(control.entityId) !== previousState) return;
+      const timedOut = new Map(this._inlineControlPending);
+      timedOut.delete(control.entityId);
+      this._inlineControlPending = timedOut;
+    }, 5000);
+    this._runAction(control.action, metric.entity, control.trigger);
   }
 
   private _lightDetailIcon(entityId: string): string {
@@ -2374,6 +2647,14 @@ export class AreaGlanceCard extends LitElement {
   protected updated(changed: PropertyValues<this>) {
     this._syncTowerIconMode();
     this._syncChartPlotSize();
+    if (changed.has("hass" as never) && this._inlineControlPending.size) {
+      const resolved = new Map(this._inlineControlPending);
+      for (const [entityId, previousState] of resolved) {
+        const currentState = this.hass?.states[entityId]?.state;
+        if (currentState !== undefined && currentState !== previousState) resolved.delete(entityId);
+      }
+      if (resolved.size !== this._inlineControlPending.size) this._inlineControlPending = resolved;
+    }
     if (!changed.has("_detail" as never)) return;
     const dialog = this.renderRoot.querySelector<HTMLDialogElement>(".detail-sheet");
     if (this._detail && dialog && !dialog.open) dialog.showModal();
@@ -2424,7 +2705,7 @@ export class AreaGlanceCard extends LitElement {
     const status = this._status();
     const metrics = this._effectiveMetrics().map((metric) => ({ metric, display: this._metric(metric) })).filter((entry): entry is { metric: MetricConfig; display: MetricDisplay } => Boolean(entry.display));
     const title = this._config.title
-      ?? (this._config.profile === "house" ? "House" : this._config.profile === "security" ? "Security" : this._config.profile === "energy" ? "Energy" : this._config.profile === "battery" ? "Home battery" : this._config.profile === "cameras" ? "Cameras" : this._areaName(this._config.area))
+      ?? (this._config.profile === "house" ? "House" : this._config.profile === "security" ? "Security" : this._config.profile === "energy" ? "Energy" : this._config.profile === "battery" ? "Home battery" : this._config.profile === "cameras" ? "Cameras" : this._config.profile === "mini_charts" ? "Mini charts" : this._areaName(this._config.area))
       ?? "Area";
     const showHeader = this._config.layout !== "metrics-only";
     const headerAlignment = this._config.layout === "stacked" || this._config.layout === "tower" ? this._config.header_alignment ?? "left" : "left";
@@ -2455,11 +2736,18 @@ export class AreaGlanceCard extends LitElement {
               const valueParts = splitDisplayUnit(display.value);
               const cameraVisual = display.visual?.kind === "camera" ? display.visual : undefined;
               const iconColor = this._insightIconColor(metric, display);
+              const displayedToggle = !cameraVisual ? this._displayedToggle(metric) : undefined;
+              const miniChartVisual = !cameraVisual && !displayedToggle ? this._renderMiniChart(metric, display) : nothing;
+              const hasMiniChart = Boolean(metric.mini_chart && this._miniChartHistory.get(this._miniChartKey(metric) ?? "")?.history?.points.length);
+              const inlineControlPending = displayedToggle ? this._inlineControlPending.has(displayedToggle.entityId) : false;
+              // A direct colour on an insight is an intentional local override. Otherwise,
+              // controls use the calm shared appearance colour rather than a preset icon colour.
+              const toggleColor = metric.color?.trim() || appearance?.toggle_color || "var(--area-glance-accent)";
               return html`
-                <button class=${`metric${cameraVisual ? " camera-feed" : ""}`} style=${`--area-glance-value-fit:${this._textFit(valueParts.primary, "value")};--area-glance-value-cap:${this._textContainerCap(valueParts.primary, "value")}cqi;--area-glance-unit-fit:${this._unitFit(valueParts.primary, valueParts.unit)};--area-glance-label-fit:${this._textFit(display.label, "label")};--area-glance-label-cap:${this._textContainerCap(display.label, "label")}cqi`} aria-label=${cameraVisual ? `Open ${cameraVisual.alt}` : `${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)} @pointerdown=${(event: PointerEvent) => this._metricPointerDown(metric, display, event)} @pointermove=${(event: PointerEvent) => this._metricPointerMove(event)} @pointerup=${(event: PointerEvent) => this._metricPointerUp(event)} @pointercancel=${() => this._cancelMetricGesture()} @contextmenu=${(event: Event) => event.preventDefault()} @keydown=${(event: KeyboardEvent) => this._metricKeyDown(metric, display, event)}>
-                  ${cameraVisual ? html`<img class="camera-preview" src=${cameraVisual.src} alt=${cameraVisual.alt}>` : display.visual?.kind === "analogue-clock" ? html`<span class="analogue-clock" style=${`--hour-angle:${display.visual.hourAngle}deg;--minute-angle:${display.visual.minuteAngle}deg;color:${iconColor ?? "var(--area-glance-accent)"}`}></span>` : display.visual?.kind === "calendar" ? html`<span class="calendar-date" style=${iconColor ? `color:${iconColor}` : ""}><small>${display.visual.month}</small><strong>${display.visual.day}</strong></span>` : html`${showInsightIcons && metric.show_icon !== false && metric.preset !== "clock" ? html`<ha-icon .icon=${display.icon} style=${iconColor ? `color:${iconColor}` : ""}></ha-icon>` : nothing}<span class="value"><span class="value-primary">${valueParts.primary}</span>${valueParts.unit ? html`<span class="value-unit">${valueParts.unit}</span>` : nothing}</span>`}
+                <div class=${`metric${cameraVisual ? " camera-feed" : ""}${displayedToggle ? " inline-control-metric" : ""}${hasMiniChart ? " mini-chart-metric" : ""}`} role="button" tabindex="0" style=${`--area-glance-value-fit:${this._textFit(valueParts.primary, "value")};--area-glance-value-cap:${this._textContainerCap(valueParts.primary, "value")}cqi;--area-glance-unit-fit:${this._unitFit(valueParts.primary, valueParts.unit)};--area-glance-label-fit:${this._textFit(display.label, "label")};--area-glance-label-cap:${this._textContainerCap(display.label, "label")}cqi`} aria-label=${cameraVisual ? `Open ${cameraVisual.alt}` : `${display.label}: ${display.value}${display.aggregate ? ", show included entities" : ""}`} @click=${(event: Event) => this._metricClicked(metric, display, event)} @pointerdown=${(event: PointerEvent) => this._metricPointerDown(metric, display, event)} @pointermove=${(event: PointerEvent) => this._metricPointerMove(event)} @pointerup=${(event: PointerEvent) => this._metricPointerUp(event)} @pointercancel=${() => this._cancelMetricGesture()} @contextmenu=${(event: Event) => event.preventDefault()} @keydown=${(event: KeyboardEvent) => this._metricKeyDown(metric, display, event)}>
+                  ${cameraVisual ? html`<img class="camera-preview" src=${cameraVisual.src} alt=${cameraVisual.alt}>` : displayedToggle ? html`<span class="slot-control-visual" style=${`--area-glance-toggle-color:${toggleColor}`}><button class=${`slot-toggle ${displayedToggle.isOn ? "active" : ""}${inlineControlPending ? " pending" : ""}`} role="switch" aria-checked=${String(displayedToggle.isOn)} aria-busy=${String(inlineControlPending)} ?disabled=${inlineControlPending} aria-label=${inlineControlPending ? `Updating ${display.label}` : `${display.label} is ${displayedToggle.isOn ? "on" : "off"}. Toggle`} @pointerdown=${(event: Event) => event.stopPropagation()} @click=${(event: Event) => this._runDisplayedToggle(event, metric, displayedToggle)}><span></span></button></span>` : hasMiniChart ? miniChartVisual : display.visual?.kind === "analogue-clock" ? html`<span class="analogue-clock" style=${`--hour-angle:${display.visual.hourAngle}deg;--minute-angle:${display.visual.minuteAngle}deg;color:${iconColor ?? "var(--area-glance-accent)"}`}></span>` : display.visual?.kind === "calendar" ? html`<span class="calendar-date" style=${iconColor ? `color:${iconColor}` : ""}><small>${display.visual.month}</small><strong>${display.visual.day}</strong></span>` : html`${showInsightIcons && metric.show_icon !== false && metric.preset !== "clock" ? html`<ha-icon .icon=${display.icon} style=${iconColor ? `color:${iconColor}` : ""}></ha-icon>` : nothing}<span class="value"><span class="value-primary">${valueParts.primary}</span>${valueParts.unit ? html`<span class="value-unit">${valueParts.unit}</span>` : nothing}</span>`}
                   ${!cameraVisual && metric.show_label !== false ? html`<span class="label">${display.label}</span>` : nothing}
-                </button>
+                </div>
               `;
             })}
           </div>
@@ -2586,12 +2874,49 @@ export class AreaGlanceCard extends LitElement {
     small { display:block; font-size:inherit; }
     .metrics { min-width:0; display:grid; grid-template-columns:repeat(var(--metric-count), minmax(0, 1fr)); }
     .metric { appearance:none; position:relative; container-type:inline-size; border:0; background:transparent; color:var(--primary-text-color); display:flex; flex-direction:column; align-items:center; justify-content:center; min-width:0; padding:var(--area-glance-metric-padding, 3px); font:inherit; cursor:pointer; touch-action:manipulation; }
+    .metric:focus-visible { outline:2px solid var(--area-glance-accent); outline-offset:-2px; }
+    /* Reserve the same icon-plus-value stack as a normal insight so every
+       label shares one baseline, even when a control replaces the value. */
+    .slot-control-visual { display:flex; align-items:center; justify-content:center; min-height:calc(var(--area-glance-icon-size, 25px) + var(--area-glance-value-size, 1.92rem) + 5px); margin-bottom:2px; }
+    .slot-toggle { width:40px; height:23px; padding:2px; margin:0; border:1px solid color-mix(in srgb, var(--area-glance-toggle-color, var(--area-glance-accent)) 52%, var(--divider-color)); border-radius:999px; background:color-mix(in srgb, var(--area-glance-toggle-color, var(--area-glance-accent)) 36%, var(--card-background-color)); cursor:pointer; transition:background .18s ease, border-color .18s ease; }
+    .slot-toggle.active { border-color:var(--area-glance-toggle-color, var(--area-glance-accent)); background:var(--area-glance-toggle-color, var(--area-glance-accent)); }
+    .slot-toggle span { display:block; width:18px; height:18px; border-radius:50%; background:var(--card-background-color); box-shadow:0 1px 2px rgb(0 0 0 / 20%); transition:transform .18s ease; }
+    .slot-toggle.active span { transform:translateX(17px); }
+    .inline-control-metric > .label { position:relative; top:-1px; }
+    .slot-toggle.pending { cursor:progress; animation:slot-control-pending .8s ease-in-out infinite; }
+    .slot-toggle:disabled { opacity:1; cursor:progress; }
+    @keyframes slot-control-pending { 50% { opacity:.48; } }
     /* The grid owns camera-slot width. A camera's native aspect ratio may only
        decide what gets cropped inside that fixed rectangle, never the width of
        a neighbouring insight. */
     .metric.camera-feed { display:block; align-self:stretch; width:100%; min-width:0; max-width:100%; height:100%; min-height:0; overflow:hidden; padding:0; }
     .layout.tower .metric.camera-feed { display:block; padding:0; }
     .camera-preview { display:block; width:100%; max-width:100%; height:100%; min-height:0; object-fit:cover; object-position:center; background:var(--secondary-background-color); }
+    /* Mini charts deliberately read as a compact trend rather than a reduced
+       version of the full chart: no values, axes, or labels compete with the
+       ordinary insight label below. */
+    .mini-chart-visual { position:relative; display:block; width:100%; height:44px; margin-bottom:2px; color:var(--mini-chart-positive, var(--area-glance-accent)); }
+    .mini-chart-visual svg { display:block; width:100%; height:100%; overflow:visible; }
+    /* A compact value is useful when the trend needs an immediate reading.
+       The small surface-colour halo protects it without breaking the line into
+       artificial segments. */
+    .mini-chart-current { position:absolute; left:4px; bottom:2px; z-index:1; max-width:calc(100% - 8px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--primary-text-color); background:color-mix(in srgb, var(--card-background-color) 90%, transparent); box-shadow:0 0 0 3px color-mix(in srgb, var(--card-background-color) 90%, transparent); border-radius:2px; font-size:min(calc(var(--area-glance-value-size, 1.92rem) * .58 * var(--area-glance-value-scale, 1)), calc(18cqi * var(--area-glance-value-scale, 1))); font-weight:750; line-height:1.05; letter-spacing:-.025em; }
+    .value-position-top_left .mini-chart-current { top:2px; bottom:auto; }
+    .value-position-centre .mini-chart-current { top:50%; left:50%; bottom:auto; transform:translate(-50%, -50%); }
+    .value-position-top_right .mini-chart-current { top:2px; right:4px; left:auto; bottom:auto; text-align:right; }
+    .value-position-bottom_right .mini-chart-current { right:4px; left:auto; text-align:right; }
+    .mini-chart-visual.value-below { height:57px; }
+    .mini-chart-visual.value-below svg { height:42px; }
+    .mini-chart-current.below { bottom:0; }
+    .mini-chart-line { fill:none; stroke:var(--mini-chart-positive); stroke-width:var(--mini-chart-line-width, 1.8px); vector-effect:non-scaling-stroke; stroke-linecap:round; stroke-linejoin:round; }
+    .mini-chart-line.negative { stroke:var(--mini-chart-negative); }
+    .mini-chart-line.comparison-current { stroke:var(--mini-chart-comparison-current, #e85d20); }
+    .mini-chart-line.comparison-previous { stroke:var(--mini-chart-comparison-previous, #9ca3af); stroke-width:var(--mini-chart-comparison-previous-width, 1.6px); opacity:.9; }
+    .mini-chart-fill { fill:var(--mini-chart-positive); opacity:var(--mini-chart-fill-opacity, .18); }
+    .mini-chart-fill.negative { fill:var(--mini-chart-negative); }
+    .mini-chart-baseline { stroke:color-mix(in srgb, var(--primary-text-color) 32%, transparent); stroke-width:1; vector-effect:non-scaling-stroke; }
+    .mini-chart-bar { fill:var(--mini-chart-positive); }
+    .mini-chart-bar.negative { fill:var(--mini-chart-negative); }
     .metric::before { content:""; position:absolute; left:0; top:10%; height:80%; width:1px; background:color-mix(in srgb, var(--primary-text-color) 12%, transparent); }
     .regular-weight .title { font-weight:650; letter-spacing:-.024em; }
     .regular-weight .status { font-weight:430; }
@@ -2609,9 +2934,15 @@ export class AreaGlanceCard extends LitElement {
     .layout.tower .metric { display:grid; grid-template-columns:calc(var(--area-glance-tower-icon-size, var(--area-glance-icon-size, 24px)) + 10px) minmax(0, 1fr); grid-template-rows:auto auto; column-gap:8px; justify-content:start; align-content:center; text-align:left; padding-inline:8px; }
     .layout.tower .metric::before { left:8px; top:0; width:calc(100% - 16px); height:1px; }
     .layout.tower .metric:first-child::before { display:none; }
+    .layout.tower .slot-control-visual { grid-column:1; grid-row:1 / span 2; min-height:0; margin:0; }
     .layout.tower .metric ha-icon, .layout.tower .metric .analogue-clock, .layout.tower .metric .calendar-date { grid-row:1 / span 2; grid-column:1; margin:0; justify-self:center; }
     .layout.tower .metric .value { grid-row:1; grid-column:2; justify-content:flex-start; }
     .layout.tower .metric .label { grid-row:2; grid-column:2; margin-top:0; }
+    /* A tower has room to let a mini trend breathe. It remains one insight,
+       but replaces the icon/value stack with a full-width visual and label. */
+    .layout.tower .metric.mini-chart-metric { grid-template-columns:minmax(0, 1fr); grid-template-rows:minmax(38px, auto) auto; row-gap:1px; align-content:center; min-height:92px; padding:7px 10px; }
+    .layout.tower .metric.mini-chart-metric .mini-chart-visual { grid-column:1; grid-row:1; height:48px; margin:0; }
+    .layout.tower .metric.mini-chart-metric .label { grid-column:1; grid-row:2; margin:0; justify-self:start; }
     .layout.tower.tower-icons-compact { --area-glance-tower-icon-size:18px; }
     .layout.tower.tower-icons-compact .metric { column-gap:7px; }
     .layout.tower.tower-icons-compact .metric ha-icon { width:var(--area-glance-tower-icon-size); height:var(--area-glance-tower-icon-size); }
@@ -2635,6 +2966,11 @@ export class AreaGlanceCard extends LitElement {
     .value-primary { min-width:0; overflow:hidden; text-overflow:ellipsis; }
     .value-unit { flex:none; margin-left:.06em; font-size:calc(1em * var(--area-glance-unit-fit, 1)); font-weight:700; letter-spacing:-.045em; }
     .label { color:var(--secondary-text-color); font-size:calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1) * var(--area-glance-label-scale, 1)); font-size:min(calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1) * var(--area-glance-label-scale, 1)), calc(var(--area-glance-label-cap, 15cqi) * var(--area-glance-label-scale, 1))); font-weight:550; line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; margin-top:1px; }
+    /* A mini chart is already width-constrained by its drawing. Its short
+       semantic label should follow the shared text scale, not be shrunk a
+       second time by the generic container-query cap. Long labels still use
+       the normal fit factor and ellipsis rather than overflowing a slot. */
+    .metric.mini-chart-metric .label { font-size:calc(var(--area-glance-label-size, .82rem) * var(--area-glance-label-fit, 1) * var(--area-glance-label-scale, 1)); }
     /* Dashboard-dark surfaces get a restrained, brighter edge so a card reads
        cleanly against HA's dark page background without looking outlined. */
     .dashboard-dark:not(.force-light) { border-color:color-mix(in srgb, #fff 14%, transparent); }
@@ -2680,7 +3016,10 @@ export class AreaGlanceCard extends LitElement {
     .light-control-panel .detail-close { width:42px; height:42px; font-size:2rem; }
     .detail-count { align-self:flex-start; display:inline-flex; align-items:center; gap:9px; padding:8px 13px; margin:0 0 18px; border-radius:999px; color:var(--primary-text-color); background:color-mix(in srgb, var(--primary-text-color) 7%, transparent); font-size:.95rem; font-weight:600; }
     .detail-count-dot { width:11px; height:11px; border-radius:50%; background:var(--state-light-active-color, var(--warning-color, #ff9800)); }
-    .detail-statistics { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); margin:-5px 0 18px; overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 10%, transparent); border-radius:13px; background:color-mix(in srgb, var(--primary-text-color) 2%, transparent); }
+    /* Aggregate panels are flex columns when their contributor list scrolls. Keep
+       this compact summary at its intrinsic height rather than letting flexbox
+       squeeze the values out of view above that list. */
+    .detail-statistics { display:grid; flex:0 0 auto; grid-template-columns:repeat(3, minmax(0, 1fr)); margin:-5px 0 18px; overflow:hidden; border:1px solid color-mix(in srgb, var(--primary-text-color) 10%, transparent); border-radius:13px; background:color-mix(in srgb, var(--primary-text-color) 2%, transparent); }
     .detail-statistics span { display:grid; gap:2px; min-width:0; padding:9px 10px; text-align:center; }
     .detail-statistics span + span { border-left:1px solid color-mix(in srgb, var(--primary-text-color) 9%, transparent); }
     .detail-statistics small { overflow:hidden; color:var(--secondary-text-color); font-size:.7rem; font-weight:600; line-height:1.1; text-overflow:ellipsis; text-transform:uppercase; white-space:nowrap; }
@@ -2836,10 +3175,11 @@ export class AreaGlanceCardEditor extends LitElement {
     if (profile === "energy") return "energy";
     if (profile === "battery") return "battery";
     if (profile === "cameras") return "cameras";
+    if (profile === "mini_charts") return "mini_charts";
     if (profile === "chart") return "chart";
     return "area";
   }
-  private _purposeSelected(purpose: "area" | "house" | "energy" | "battery" | "security" | "cameras" | "chart") {
+  private _purposeSelected(purpose: "area" | "house" | "energy" | "battery" | "security" | "cameras" | "mini_charts" | "chart") {
     if (purpose === "chart") {
       // Keep the initial chart automatic: once Energy Dashboard preferences
       // arrive, it chooses Solar generation first, then Grid flow, before any
@@ -2853,7 +3193,7 @@ export class AreaGlanceCardEditor extends LitElement {
       this._change({ profile: "chart", layout, chart, metrics: [], title: undefined, status: undefined, area: undefined });
       return;
     }
-    if (purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "battery" || purpose === "cameras") {
+    if (purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "battery" || purpose === "cameras" || purpose === "mini_charts") {
       this._populateAreaPreset("", purpose);
       return;
     }
@@ -3059,6 +3399,9 @@ export class AreaGlanceCardEditor extends LitElement {
     const color = (event.target as HTMLSelectElement).value as "default" | "black" | "grey";
     this._change({ appearance: { ...this._config.appearance, insight_icon_color: color === "default" ? undefined : color } });
   }
+  private _toggleColorChanged(event: Event) {
+    this._change({ appearance: { ...this._config.appearance, toggle_color: (event.target as HTMLInputElement).value.toUpperCase() } });
+  }
   private _areaIconChanged(event: Event) {
     const area_icon = this._pickerValue(event);
     this._change({ appearance: { ...this._config.appearance, area_icon: area_icon || undefined } });
@@ -3175,6 +3518,17 @@ export class AreaGlanceCardEditor extends LitElement {
         title: this._config.layout === "metrics-only" ? this._config.title : "Cameras",
         status: undefined,
         metrics: metrics.length ? metrics : [presetMetric("camera")],
+      });
+      return;
+    }
+    if (profile === "mini_charts") {
+      this._suggestionsNeedUpdate = false;
+      this._change({
+        area: undefined,
+        profile: "mini_charts",
+        title: this._config.layout === "metrics-only" ? this._config.title : "Mini charts",
+        status: undefined,
+        metrics: DEFAULT_MINI_CHART_METRICS.map((metric) => ({ ...metric, mini_chart: { ...metric.mini_chart } })),
       });
       return;
     }
@@ -3344,6 +3698,7 @@ export class AreaGlanceCardEditor extends LitElement {
       delete updated.attention_types;
       delete updated.attention_scope;
       delete updated.vacuum_display;
+      delete updated.inline_control;
       Object.assign(updated, presetMetric(change.preset));
       if (AUTOMATIC_METRIC_PRESETS.includes(change.preset)) updated.entity = undefined;
       else {
@@ -3484,11 +3839,41 @@ export class AreaGlanceCardEditor extends LitElement {
   }
   private _metricActionChanged(index: number, trigger: "tap" | "hold" | "double", event: Event) {
     const action = (event.target as HTMLSelectElement).value as NonNullable<ActionConfig["action"]> | "auto";
+    const metric = (this._config.metrics ?? [])[index];
+    const displayKey = trigger === "tap" ? "tap" : trigger === "hold" ? "hold" : undefined;
+    const clearToggle = action !== "toggle" && metric?.display_as_toggle === displayKey;
     if (trigger === "tap") {
-      this._updateMetric(index, { action: action === "auto" ? undefined : action });
+      this._updateMetric(index, { action: action === "auto" ? undefined : action, ...(clearToggle ? { display_as_toggle: undefined } : {}) });
       return;
     }
-    this._updateMetric(index, { [trigger === "hold" ? "hold_action" : "double_tap_action"]: action === "auto" ? undefined : { action } });
+    this._updateMetric(index, { [trigger === "hold" ? "hold_action" : "double_tap_action"]: action === "auto" ? undefined : { action }, ...(clearToggle ? { display_as_toggle: undefined } : {}) });
+  }
+  private _toggleDisplayChanged(index: number, trigger: "tap" | "hold", event: Event) {
+    const checked = (event.target as HTMLInputElement).checked;
+    this._updateMetric(index, { display_as_toggle: checked ? trigger : undefined, inline_control: undefined });
+  }
+  private _miniChartPresentationChanged(index: number, event: Event) {
+    const value = (event.target as HTMLSelectElement).value;
+    const metric = (this._config.metrics ?? [])[index];
+    if (value !== "mini") {
+      this._updateMetric(index, { mini_chart: undefined });
+      return;
+    }
+    // A compact trace must be based on a single recorder source. Switching an
+    // automatic area aggregate to the normal direct-entity path makes that
+    // constraint visible and immediately gives the editor an entity picker.
+    // Energy Dashboard-backed metrics retain their explicit source.
+    this._updateMetric(index, {
+      mini_chart: { type: "line", range: "24h" },
+      ...(!metric?.energy_source && (metric?.source ?? "area") !== "entity"
+        ? { source: "entity", entities: undefined }
+        : {}),
+    });
+  }
+  private _miniChartChanged(index: number, change: Partial<MiniChartConfig>) {
+    const metric = (this._config.metrics ?? [])[index];
+    if (!metric?.mini_chart) return;
+    this._updateMetric(index, { mini_chart: { ...metric.mini_chart, ...change } });
   }
   private _metricActionInput(index: number, trigger: "tap" | "hold" | "double", key: keyof ActionConfig, event: Event) {
     const value = (event.target as HTMLInputElement).value;
@@ -3499,14 +3884,6 @@ export class AreaGlanceCardEditor extends LitElement {
     const metric = (this._config.metrics ?? [])[index];
     const actionKey = trigger === "hold" ? "hold_action" : "double_tap_action";
     this._updateMetric(index, { [actionKey]: { ...metric[actionKey], [key]: value || undefined } });
-  }
-  private _toggleMetricConfirmation(index: number, trigger: "tap" | "hold" | "double", event: Event) {
-    const checked = (event.target as HTMLInputElement).checked;
-    const message = checked ? "Are you sure?" : undefined;
-    if (trigger === "tap") { this._updateMetric(index, { confirmation: message }); return; }
-    const metric = (this._config.metrics ?? [])[index];
-    const actionKey = trigger === "hold" ? "hold_action" : "double_tap_action";
-    this._updateMetric(index, { [actionKey]: { ...metric[actionKey], confirmation: message } });
   }
   private _metricActionFields(index: number, metric: MetricConfig, trigger: "tap" | "hold" | "double", usesArea: boolean) {
     const config = this._metricAction(metric, trigger);
@@ -3520,7 +3897,7 @@ export class AreaGlanceCardEditor extends LitElement {
     </select></label>
     ${action === "navigate" ? html`<label>Dashboard path <input .value=${config?.navigation_path ?? ""} placeholder="/dashboard/room" @input=${(event: Event) => this._metricActionInput(index, trigger, "navigation_path", event)}></label>` : nothing}
     ${action === "call-service" ? html`<label>Service <input .value=${config?.service ?? ""} placeholder="light.turn_on" @input=${(event: Event) => this._metricActionInput(index, trigger, "service", event)}></label>` : nothing}
-    ${action === "toggle" || action === "call-service" ? html`<label class="checkbox"><input type="checkbox" .checked=${Boolean(config?.confirmation)} @change=${(event: Event) => this._toggleMetricConfirmation(index, trigger, event)}> Ask for confirmation</label>` : nothing}`;
+    ${action === "toggle" && (trigger === "tap" || trigger === "hold") ? html`<label class="checkbox"><input type="checkbox" .checked=${metric.display_as_toggle === trigger} @change=${(event: Event) => this._toggleDisplayChanged(index, trigger, event)}> Display as toggle</label><p class="slot-hint">Shows this insight as a switch. Using the switch runs this Toggle action.</p>` : nothing}`;
   }
   private _updateThreshold(index: number, thresholdIndex: number, change: Partial<NonNullable<MetricConfig["thresholds"]>[number]>) {
     const metrics = [...(this._config.metrics ?? [])];
@@ -3584,9 +3961,9 @@ export class AreaGlanceCardEditor extends LitElement {
       <section class="setup">
         <span class="section-label">What does this card show?</span>
         <div class="purpose-grid">
-          ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"], ["security", "Security", "Home security"], ["cameras", "Cameras", "Live camera feeds"], ["chart", "Chart", "Compact history"] ] as const).map(([value, title, description]) => html`<button class="purpose ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
+          ${([ ["area", "An area", "Room insights"], ["house", "Whole home", "Home overview"], ["energy", "Energy", "Energy system"], ["battery", "Home battery", "Battery system"], ["security", "Security", "Home security"], ["cameras", "Cameras", "Live camera feeds"], ["mini_charts", "Mini charts", "Compact trends"], ["chart", "Chart", "Compact history"] ] as const).map(([value, title, description]) => html`<button class="purpose ${purpose === value ? "selected" : ""}" aria-pressed=${purpose === value} @click=${() => this._purposeSelected(value)}><strong>${title}</strong><small>${description}</small></button>`)}
         </div>
-        ${purpose === "chart" ? html`<p class="applied">A dedicated chart uses one selected source. Its live summary updates immediately; recorded history refreshes calmly in the background.</p>` : purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "battery" || purpose === "cameras" ? html`<p class="applied">${purpose === "energy" ? "System-wide live insights come from the Energy Dashboard setup. If it is not configured, add your own entity insights below." : purpose === "battery" ? "Battery charge, flow, solar, and grid readings come from the Energy Dashboard setup. If it is not configured, replace those slots with your own entity insights." : purpose === "security" ? "Whole-home security suggestions are applied." : purpose === "cameras" ? "Up to three feeds are selected: one lower-resolution camera per device where Home Assistant exposes that information." : "Whole-home suggestions are applied."} You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._areaPickerValue(this._config.area)} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._showcaseAreaHint(this._config.area)}${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
+        ${purpose === "chart" ? html`<p class="applied">A dedicated chart uses one selected source. Its live summary updates immediately; recorded history refreshes calmly in the background.</p>` : purpose === "house" || purpose === "security" || purpose === "energy" || purpose === "battery" || purpose === "cameras" || purpose === "mini_charts" ? html`<p class="applied">${purpose === "energy" ? "System-wide live insights come from the Energy Dashboard setup. If it is not configured, add your own entity insights below." : purpose === "battery" ? "Battery charge, flow, solar, and grid readings come from the Energy Dashboard setup. If it is not configured, replace those slots with your own entity insights." : purpose === "mini_charts" ? "Four editable Energy Dashboard insights demonstrate line, area, columns, and stepped trends. Replace any source or change its chart treatment below." : purpose === "security" ? "Whole-home security suggestions are applied." : purpose === "cameras" ? "Up to three feeds are selected: one lower-resolution camera per device where Home Assistant exposes that information." : "Whole-home suggestions are applied."} You can refine the insights below.</p>` : html`<ha-area-picker .hass=${this.hass} .value=${this._areaPickerValue(this._config.area)} .label=${areaLabel} @value-changed=${this._areaSelected}></ha-area-picker>${this._showcaseAreaHint(this._config.area)}${this._suggestionsNeedUpdate ? html`<div class="suggestion-update"><span>${currentAreaName} is selected. Update the insights to match it?</span><button class="primary" @click=${this._applySuggestions}>Update suggestions</button></div>` : this._config.area ? html`<p class="applied">Suggestions are based on ${currentAreaName}. Change any insight below.</p>` : nothing}`}
       </section>
       ${purpose === "chart" ? html`<section class="card-layout">
         <span class="section-label">What layout does this card have?</span>
@@ -3608,6 +3985,10 @@ export class AreaGlanceCardEditor extends LitElement {
         const usesAggregate = usesArea || usesSelectedEntities;
         const selfContained = preset === "clock" || preset === "calendar";
         const requiresEntity = source === "entity" && !selfContained;
+        // Energy Dashboard sources resolve to a specific live entity too. Keep the
+        // label controls honest for aggregates, but allow either direct source to
+        // use its current value as the small insight label.
+        const supportsLiveLabel = requiresEntity || Boolean(metric.energy_source);
         const isBinarySensor = requiresEntity && metric.entity?.startsWith("binary_sensor.");
         const sourceLabel = metric.energy_source ? "Energy Dashboard" : usesArea ? (wholeHomeAggregate ? "Whole home" : preset === "attention" ? "Area health" : preset === "lights" ? "Area count" : "Whole area") : usesSelectedEntities ? "Selected entities" : selfContained ? "Live date & time" : preset === "people_home" ? "Home zone" : "One entity";
         const contributorHint = this._contributorHint(metric, preset, usesArea);
@@ -3626,11 +4007,11 @@ export class AreaGlanceCardEditor extends LitElement {
         return html`<details class="insight-editor ${this._draggedMetricIndex === index ? "dragging" : ""} ${this._dragOverMetricIndex === index ? "drag-over" : ""}" style=${`--reorder-shift:${this._dragShift(index)}px`} @dragover=${(event: DragEvent) => this._dragOver(event)} @drop=${(event: DragEvent) => this._dropMetric(index, event)}>
         <summary><span class="drag-handle" draggable="true" role="img" aria-label="Drag insight to reorder" title="Drag to reorder" @click=${(event: Event) => { event.preventDefault(); event.stopPropagation(); }} @dragstart=${(event: DragEvent) => this._dragStart(index, event)} @dragend=${(event: DragEvent) => this._dragEnd(event)}>⠿</span><ha-icon .icon=${metric.icon ?? PRESETS[preset].icon}></ha-icon><span class="insight-name">${PRESETS[preset].label}</span><span class="source-pill">${sourceLabel}</span></summary>
         <div class="insight-fields"><label>What should this show?
-          <select .value=${metric.preset ?? "custom"} @change=${(e: Event) => this._updateMetric(index, { preset: (e.target as HTMLSelectElement).value as MetricPreset })}>
-            <optgroup label="Automatic area insights">${AUTOMATIC_METRIC_PRESETS.map((option) => html`<option value=${option}>${PRESETS[option].label}</option>`)}</optgroup>
-            <optgroup label="Chosen entities and utilities">${DEVICE_METRIC_PRESETS.map((option) => html`<option value=${option}>${PRESETS[option].label}</option>`)}</optgroup>
-            ${preset === "occupancy" ? html`<option value="occupancy">${PRESETS.occupancy.label}</option>` : nothing}
-          </select>
+          ${keyed(preset, html`<select @change=${(e: Event) => this._updateMetric(index, { preset: (e.target as HTMLSelectElement).value as MetricPreset })}>
+            <optgroup label="Automatic area insights">${AUTOMATIC_METRIC_PRESETS.map((option) => html`<option value=${option} ?selected=${option === preset}>${PRESETS[option].label}</option>`)}</optgroup>
+            <optgroup label="Chosen entities and utilities">${DEVICE_METRIC_PRESETS.map((option) => html`<option value=${option} ?selected=${option === preset}>${PRESETS[option].label}</option>`)}</optgroup>
+            ${preset === "occupancy" ? html`<option value="occupancy" ?selected=${true}>${PRESETS.occupancy.label}</option>` : nothing}
+          </select>`) }
         </label>
         <p class="slot-hint">${SLOT_HELPERS[preset]}</p>
         ${metric.energy_source ? html`<p class="slot-hint">This live reading is linked to the matching source in your Energy Dashboard. Remove it or add another insight if you would prefer a manual entity.</p>` : canChooseSource ? html`<label>Use data from
@@ -3663,7 +4044,18 @@ export class AreaGlanceCardEditor extends LitElement {
           </div>
         ` : nothing}
         <details class="more-options"><summary>Fine tuning (optional)</summary>
-          ${preset !== "custom" ? html`<label>Label source<select .value=${metric.label_mode ?? (metric.label && metric.label !== PRESETS[preset].label && !(preset === "temperature" && metric.label === "Temperature") ? "custom" : "preset")} @change=${(e: Event) => { const labelMode = (e.target as HTMLSelectElement).value as MetricConfig["label_mode"]; this._updateMetric(index, { label_mode: labelMode, ...(labelMode === "preset" ? { label: undefined } : {}) }); }}><option value="preset">Preset label</option>${requiresEntity ? html`<option value="entity">Entity name</option>` : nothing}<option value="custom">Custom label</option></select></label>` : nothing}
+          <label>Insight presentation<select .value=${metric.mini_chart ? "mini" : "standard"} @change=${(e: Event) => this._miniChartPresentationChanged(index, e)}><option value="standard">Standard value</option><option value="mini">Mini chart trend</option></select></label>
+          ${metric.mini_chart ? html`
+            ${!metric.entity && !metric.energy_source ? html`<p class="slot-hint">Mini charts need one chosen entity or an Energy Dashboard source. Select “One entity” above, then choose the measurement you want to trend.</p>` : html`<p class="slot-hint">This compact chart uses the selected source’s recorded history. Area aggregates stay live summaries, so they are never turned into an invented combined trace.</p>`}
+            <div class="two"><label>Chart type<select .value=${metric.mini_chart.type ?? "line"} @change=${(e: Event) => this._miniChartChanged(index, { type: (e.target as HTMLSelectElement).value as NonNullable<MiniChartConfig["type"]> })}><option value="line">Line</option><option value="area">Area</option><option value="columns">Columns</option></select></label><label>History range<select .value=${metric.mini_chart.range ?? "24h"} @change=${(e: Event) => this._miniChartChanged(index, { range: (e.target as HTMLSelectElement).value as NonNullable<MiniChartConfig["range"]> })}><option value="6h">6 hours</option><option value="24h">24 hours</option><option value="48h">48 hours</option><option value="7d">7 days</option><option value="14d">14 days</option><option value="30d">30 days</option></select></label></div>
+            ${(metric.mini_chart.type ?? "line") !== "columns" && metric.energy_source !== "grid" ? html`<label class="checkbox"><input type="checkbox" .checked=${metric.mini_chart.comparison === "today_yesterday"} @change=${(e: Event) => this._miniChartChanged(index, { comparison: (e.target as HTMLInputElement).checked ? "today_yesterday" : undefined })}> Compare today with yesterday</label><p class="slot-hint">A direct source overlays today in orange and yesterday in grey on one 24-hour axis. Directional Grid trends stay single because import/export is a pair of sources.</p>${metric.mini_chart.comparison === "today_yesterday" ? html`<div class="two"><label>Today colour <input type="color" .value=${metric.mini_chart.comparison_current_color ?? "#e85d20"} @input=${(e: Event) => this._miniChartChanged(index, { comparison_current_color: (e.target as HTMLInputElement).value })}></label><label>Yesterday colour <input type="color" .value=${metric.mini_chart.comparison_previous_color ?? "#9ca3af"} @input=${(e: Event) => this._miniChartChanged(index, { comparison_previous_color: (e.target as HTMLInputElement).value })}></label></div>` : nothing}` : nothing}
+            <div class="two"><label>Current value<select .value=${metric.mini_chart.value_display ?? "overlay"} @change=${(e: Event) => this._miniChartChanged(index, { value_display: (e.target as HTMLSelectElement).value as NonNullable<MiniChartConfig["value_display"]> })}><option value="overlay">Overlay chart (default)</option><option value="below">Below chart</option><option value="none">Hide value</option></select></label><label>History data<select .value=${metric.mini_chart.history_source ?? "auto"} @change=${(e: Event) => this._miniChartChanged(index, { history_source: (e.target as HTMLSelectElement).value as NonNullable<MiniChartConfig["history_source"]> })}><option value="auto">Automatic (recommended)</option><option value="raw">Detailed Recorder history</option><option value="statistics">Recorder statistics</option></select></label></div>${(metric.mini_chart.value_display ?? "overlay") === "overlay" ? html`<label>Overlay value position<select .value=${metric.mini_chart.value_position ?? "bottom_left"} @change=${(e: Event) => this._miniChartChanged(index, { value_position: (e.target as HTMLSelectElement).value as NonNullable<MiniChartConfig["value_position"]> })}><option value="bottom_left">Bottom left (default)</option><option value="top_left">Top left</option><option value="centre">Centre</option><option value="top_right">Top right</option><option value="bottom_right">Bottom right</option></select></label>` : nothing}<p class="slot-hint">The shared Insight values slider in Card appearance also scales this current-value overlay.</p><p class="slot-hint">Automatic uses detailed history up to 48 hours, then a lighter Recorder statistics view for 7–30 days.</p>
+            ${metric.mini_chart.type !== "columns" ? html`<div class="two"><label>Line style<select .value=${metric.mini_chart.line_style ?? "straight"} @change=${(e: Event) => this._miniChartChanged(index, { line_style: (e.target as HTMLSelectElement).value as NonNullable<MiniChartConfig["line_style"]> })}><option value="straight">Straight</option><option value="stepped">Stepped</option></select></label><label>Line thickness <input type="number" min="1" max="5" step="0.2" .value=${metric.mini_chart.line_thickness?.toString() ?? "1.8"} @input=${(e: Event) => { const value = (e.target as HTMLInputElement).value; const thickness = Number(value); this._miniChartChanged(index, { line_thickness: value === "" || !Number.isFinite(thickness) ? undefined : Math.max(1, Math.min(5, thickness)) }); }}></label></div>` : nothing}
+            <div class="two"><label>Trend colour <input .value=${metric.mini_chart.color ?? ""} placeholder="Use insight colour" @input=${(e: Event) => this._miniChartChanged(index, { color: (e.target as HTMLInputElement).value || undefined })}></label><label>Negative colour <input .value=${metric.mini_chart.negative_color ?? ""} placeholder="var(--orange-color)" @input=${(e: Event) => this._miniChartChanged(index, { negative_color: (e.target as HTMLInputElement).value || undefined })}></label></div>
+            ${(metric.mini_chart.type ?? "line") === "line" ? html`<div class="two"><label class="checkbox"><input type="checkbox" .checked=${metric.mini_chart.show_area === true} @change=${(e: Event) => this._miniChartChanged(index, { show_area: (e.target as HTMLInputElement).checked || undefined })}> Fill beneath line</label><label>Fill opacity <input type="number" min="0" max="100" .value=${metric.mini_chart.fill_opacity?.toString() ?? "18"} @input=${(e: Event) => { const value = (e.target as HTMLInputElement).value; this._miniChartChanged(index, { fill_opacity: value === "" ? undefined : Math.max(0, Math.min(100, Number(value))) }); }}></label></div>` : (metric.mini_chart.type === "area" ? html`<label>Fill opacity <input type="number" min="0" max="100" .value=${metric.mini_chart.fill_opacity?.toString() ?? "18"} @input=${(e: Event) => { const value = (e.target as HTMLInputElement).value; this._miniChartChanged(index, { fill_opacity: value === "" ? undefined : Math.max(0, Math.min(100, Number(value))) }); }}></label>` : nothing)}
+            <label class="checkbox"><input type="checkbox" .checked=${metric.mini_chart.show_baseline === true} @change=${(e: Event) => this._miniChartChanged(index, { show_baseline: (e.target as HTMLInputElement).checked || undefined })}> Show zero baseline</label>
+          ` : nothing}
+          ${preset !== "custom" ? html`<label>Label source<select .value=${metric.label_mode ?? (metric.label && metric.label !== PRESETS[preset].label && !(preset === "temperature" && metric.label === "Temperature") ? "custom" : "preset")} @change=${(e: Event) => { const labelMode = (e.target as HTMLSelectElement).value as MetricConfig["label_mode"]; this._updateMetric(index, { label_mode: labelMode, ...(labelMode === "preset" ? { label: undefined } : {}) }); }}><option value="preset">Preset label</option>${supportsLiveLabel ? html`<option value="entity">Entity name</option><option value="state">Current value</option>` : nothing}<option value="custom">Custom label</option></select></label>` : nothing}
           <div class="two"><label>${preset === "custom" ? "Supporting text fallback" : "Custom label"} <input .value=${preset === "custom" ? metric.secondary_text ?? "" : metric.label ?? ""} placeholder=${PRESETS[preset].label} @input=${(e: Event) => this._updateMetric(index, preset === "custom" ? { secondary_text: (e.target as HTMLInputElement).value || undefined } : { label_mode: "custom", label: (e.target as HTMLInputElement).value || undefined })}></label><ha-icon-picker label="Icon" .value=${metric.icon ?? ""} .placeholder=${PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon: this._pickerValue(e) })}></ha-icon-picker></div>
           ${isBinarySensor ? html`<details class="binary-icons"><summary>Binary sensor icons</summary><p class="slot-hint">Optional overrides for the sensor's current state. Leave a field empty to use the normal insight icon.</p><div class="three"><ha-icon-picker label="On / true" .value=${metric.icon_on ?? ""} .placeholder=${metric.icon ?? PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon_on: this._pickerValue(e) || undefined })}></ha-icon-picker><ha-icon-picker label="Off / false" .value=${metric.icon_off ?? ""} .placeholder=${metric.icon ?? PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon_off: this._pickerValue(e) || undefined })}></ha-icon-picker><ha-icon-picker label="Unknown" .value=${metric.icon_unknown ?? ""} .placeholder=${metric.icon ?? PRESETS[preset].icon} @value-changed=${(e: Event) => this._updateMetric(index, { icon_unknown: this._pickerValue(e) || undefined })}></ha-icon-picker></div></details>` : nothing}
           ${preset === "attention" ? html`<label>Colour <input .value=${metric.color ?? ""} placeholder="var(--warning-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value || undefined })}></label><label class="checkbox"><input type="checkbox" .checked=${metric.show_icon !== false} @change=${(e: Event) => this._updateMetric(index, { show_icon: (e.target as HTMLInputElement).checked })}> Show icon</label>` : html`<div class="two"><label>${preset === "custom" ? "Fallback colour" : "Colour"} <input .value=${metric.color ?? ""} placeholder="var(--primary-color)" @input=${(e: Event) => this._updateMetric(index, { color: (e.target as HTMLInputElement).value || undefined })}></label>${supportsDecimals ? unitOptions ? html`<label>Display unit<select .value=${metric.unit ?? ""} @change=${(e: Event) => this._updateMetric(index, { unit: (e.target as HTMLSelectElement).value || undefined })}>${unitOptions.map(([value, name]) => html`<option value=${value}>${name}</option>`)}</select></label>` : html`<label>Unit override <input .value=${metric.unit ?? ""} @input=${(e: Event) => this._updateMetric(index, { unit: (e.target as HTMLInputElement).value || undefined })}></label>` : nothing}</div>
@@ -3714,7 +4106,7 @@ export class AreaGlanceCardEditor extends LitElement {
         <label>Size<select .value=${this._config.height ?? "slim"} @change=${this._heightChanged}><option value="slim">Slim (default)</option><option value="compact">Compact</option><option value="standard">Medium</option><option value="comfortable">Tall</option></select></label>
         <label class="checkbox"><input type="checkbox" .checked=${this._config.appearance?.show_area_icon === true} @change=${this._areaIconVisibilityChanged}> Show area icon</label>
         ${this._config.appearance?.show_area_icon === true ? html`<ha-icon-picker label="Area icon (automatic by default)" .value=${this._config.appearance?.area_icon ?? ""} placeholder="mdi:map-marker-radius-outline" @value-changed=${this._areaIconChanged}></ha-icon-picker><p class="slot-hint">The icon is inferred from the area or profile. Set one here only when you want to override it.</p>` : nothing}
-        ${purpose !== "chart" ? html`<label class="checkbox"><input type="checkbox" .checked=${this._config.appearance?.show_insight_icons !== false} @change=${this._insightIconVisibilityChanged}> Show insight icons</label>${this._config.appearance?.show_insight_icons !== false ? html`<label>Insight icon colours<select .value=${this._config.appearance?.insight_icon_color ?? "default"} @change=${this._insightIconColorChanged}><option value="default">Preset colours (default)</option><option value="black">Black</option><option value="grey">Grey</option></select></label><p class="slot-hint">Changes the shared default only. A colour set in an insight's Fine tuning, including threshold or state colours, still wins.</p>` : nothing}<p class="slot-hint">Turn icons off for a quieter, value-led look. Camera previews, analogue clocks, and calendar tiles keep their dedicated visual display.</p>` : nothing}
+        ${purpose !== "chart" ? html`<label class="checkbox"><input type="checkbox" .checked=${this._config.appearance?.show_insight_icons !== false} @change=${this._insightIconVisibilityChanged}> Show insight icons</label>${this._config.appearance?.show_insight_icons !== false ? html`<label>Insight icon colours<select .value=${this._config.appearance?.insight_icon_color ?? "default"} @change=${this._insightIconColorChanged}><option value="default">Preset colours (default)</option><option value="black">Black</option><option value="grey">Grey</option></select></label><p class="slot-hint">Changes the shared default only. A colour set in an insight's Fine tuning, including threshold or state colours, still wins.</p>` : nothing}<label>Toggle colour <input type="color" .value=${this._config.appearance?.toggle_color ?? "#03A9F4"} @input=${this._toggleColorChanged}></label><p class="slot-hint">Used by direct entity controls. An insight's own Fine tuning colour overrides this shared default.</p><p class="slot-hint">Turn icons off for a quieter, value-led look. Camera previews, analogue clocks, and calendar tiles keep their dedicated visual display.</p>` : nothing}
         <label>Colour style<select .value=${appearancePreset} @change=${this._appearancePresetChanged}><option value="theme">Use dashboard theme</option><option value="light">Light</option><option value="slate">Slate</option><option value="charcoal">Dark</option><option value="custom">Custom background</option></select></label>
         ${appearancePreset === "custom" ? html`<label>Background colour <input type="color" .value=${this._config.appearance?.background ?? "#353c45"} @input=${this._customBackgroundChanged}></label>` : nothing}
         <div class="text-scale-row"><label>Corner rounding<input type="range" min="0" max="48" step="1" .value=${String(cornerRadius)} @input=${this._cornerRadiusChanged}></label><output>${cornerRadius}px</output></div>

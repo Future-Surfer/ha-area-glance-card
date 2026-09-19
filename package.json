@@ -1,6 +1,6 @@
 {
   "name": "ha-area-glance-card",
-  "version": "0.2.0",
+  "version": "0.4.2",
   "private": true,
   "description": "A compact, preset-led Home Assistant area summary card.",
   "type": "module",

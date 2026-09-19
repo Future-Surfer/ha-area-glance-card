@@ -77,6 +77,47 @@ Camera previews can be used individually or via the Cameras profile, which selec
 
 **Done when:** a user can enable a compact history treatment for one compatible insight, understand it at a glance, and stack several cards without visual instability or repeated history requests.
 
+### System Status history card (exploration)
+
+**Goal:** Add a wide, entity-led history view for people who want to scan many system conditions across one shared time range, without turning the ordinary Area Glance band into a dense monitoring dashboard.
+
+Reference concept: [System Status history reference](docs/system-status-history-reference.png).
+
+- Make this a dedicated top-level card purpose, initially named **System Status** or **History overview**. It should accept an explicit, ordered list of entities and a bounded time span rather than guessing a room preset.
+- Render one horizontal history row per entity against a shared time axis. Rows must remain readable when the list is long: use a deliberate maximum/default row count, a calm scroll or pagination treatment, and a clear empty/unavailable state rather than shrinking the whole card indefinitely.
+- Support mixed Home Assistant entity types in one view. Binary and discrete states should use standard semantic colours by default (for example on/active, off/inactive, unavailable, and warning), with per-row custom colours available in Advanced settings. A state row may show labelled segments such as **On**, **Off**, **Paused**, or **Open** instead of an unexplained waveform.
+- Continuous numeric entities should use a restrained line or band treatment with optional gradients. A gradient may encode a declared threshold or low-to-high progression, but must never imply a health judgement without an explicit rule. Preserve units, gaps, and unavailable periods honestly.
+- Allow an optional icon per row. Default icons should come from Home Assistant domain/device-class metadata; custom MDI icons remain an explicit override. Icons must not determine row width or force the time plot to become narrower than the configured layout allows.
+- Keep the first editor path calm: choose the card purpose, add/reorder entities, choose a timespan, then optionally expand **Row styling** for icon, state colours, numeric gradient, thresholds, and label behaviour. Reuse the existing entity picker, friendly labels, action model, theme variables, and responsive card shell.
+- Reuse the Chart profile's history/statistics adapter, caching, local-time handling, bounded queries, and unavailable-history fallback. Fetch multiple entities as one coordinated request set, ignore stale responses, and avoid one Recorder query per row when a statistics query can cover the range.
+- Define row interactions explicitly. Tapping a row should open normal Home Assistant more-info for that entity; aggregate/detail sheets are not appropriate unless a future row represents a deliberate group. Hold and double-tap should follow the established action model.
+- Keep accessibility independent of colour: include text labels or state/value summaries, use contrast-safe defaults, expose row names and timespan semantics to assistive technology, and make unavailable/unknown distinct from ordinary off/idle.
+- Test mixed rows in Card Lab: binary toggles, multi-state entities, numeric sensors with thresholds, sparse history, unavailable periods, long lists, dark/light themes, narrow widths, and a 24-hour/7-day/30-day range. The fixture should manufacture overlapping state transitions and numeric gradients so visual regressions are obvious.
+
+**Phased delivery:**
+
+1. Define the entity-list schema, shared time-axis model, row ordering, bounded range limits, and the editor flow.
+2. Ship binary/discrete rows with standard semantic colours, icons, labels, and reliable history loading.
+3. Add continuous numeric rows with optional threshold-aware gradients and a restrained line treatment.
+4. Add custom colours, per-row styling, richer state labels, and carefully bounded long-list navigation only after the mixed-row baseline is stable.
+
+**Not in the first version:** arbitrary templates, live controls embedded in every row, multi-axis scaling, automatic whole-home discovery, or a full replacement for a dedicated history/graph dashboard.
+
+**Done when:** a user can select a useful set of entities, choose a sensible time span, and scan a trustworthy shared history view where state rows and numeric rows are visually distinct, customisable, and still legible on a normal dashboard column.
+
+### Stacked totals and contribution views
+
+**Goal:** Let compatible multi-entity views answer both “how much?” and “what share?” without changing the existing absolute-value defaults.
+
+- Add a **stacked columns** variant for Daily totals. It should accept a small, explicitly selected set of compatible cumulative entities and render each day's total as one stacked column, with clear per-entity colours and an inspectable legend.
+- Keep ordinary Daily totals single-series and absolute by default. Stacking is a deliberate chart choice, not an automatic aggregation of an area or Energy Dashboard source.
+- Add a reusable **Value mode** to stacked/contributor-style entity presentations: **Absolute** (default) or **Share of total**. Share mode expresses every compatible contributor as a percentage of the visible total for that row, column, or period.
+- Make the denominator explicit and truthful: unavailable, stale, negative, incompatible, or zero-total contributors must not produce invented percentages. Preserve the original absolute value in accessible labels and detail sheets.
+- Use the same membership, exclusion, ordering, colour, unit-normalisation, and contributor-detail infrastructure as existing multi-entity charts and aggregate sheets. Never combine unrelated dimensions.
+- Keep the first version bounded: no nested stacks, no automatic area-history aggregation, and no percentage mode for single-entity insights where it would add no information.
+
+**Done when:** a user can choose a small set of compatible accumulating entities, see their daily totals as an honest stack, and switch a suitable stacked/contributor view between absolute readings and clear shares of the displayed total.
+
 ### Multi-entity chart aggregation
 
 **Status:** Deferred until the dedicated multi-line chart has established the shared entity-selection, unit-compatibility, caching, and history-loading infrastructure.
@@ -239,10 +280,12 @@ A user can select one compatible entity, see a trustworthy stacked view of how i
 
 **Goal:** Let an insight become a calm, obvious control when its main job is changing a simple entity state, without weakening the card's dependable read-only summaries.
 
-- Add an opt-in **Action insight** for a deliberately small initial set of stateful entities: lights, switches, input booleans, fans, covers, locks, and any other domain only after its control semantics are clear and safe.
+- **Initial delivery:** direct entity insights can now opt into a conservative inline control: toggles for lights, switches, input booleans and fans, plus compact Open/Close and Lock/Unlock pairs for covers and locks. This deliberately leaves ordinary insights and aggregates informational.
+- Continue toward an opt-in **Action insight** for a deliberately small initial set of stateful entities, adding any further domain only after its control semantics are clear and safe.
 - Present its current state and a familiar toggle affordance in the segment itself. The visual state must update promptly, recover gracefully if a service call fails, and remain truthful for unavailable entities.
 - Preserve existing tap, hold, and double-tap actions for ordinary insights. An Action insight owns its primary tap for the state change; any secondary action needs an explicit, discoverable treatment rather than an invisible gesture conflict.
 - Make controls opt-in in the editor. Automatic area presets should remain informational unless a future preset can make the benefit and consequences of direct control unmistakable.
+- Present future control styles as a small set of visible preview tiles in the editor, rather than hiding visual choices in advanced fields. Behaviour and safety remain separate from a chosen appearance.
 - Reuse Home Assistant's standard action/service patterns, confirmations where appropriate, contributor membership, and detail sheets. Never infer a safe aggregate control for a mixed group of entities.
 
 **Done when:** a user can add one explicitly chosen toggleable entity, understand its present state at a glance, and change it confidently without compromising the behaviour of existing insights.
@@ -269,7 +312,7 @@ A user can select one compatible entity, see a trustworthy stacked view of how i
 - Keep that resolution deterministic and visible: the same installation should resolve the same showcase slot consistently, a missing slot must produce a clear empty state rather than silently substituting an unrelated room, and real `area:` IDs must continue to work unchanged.
 - The editor shows the resolved real area while preserving an unchanged numeric slot in YAML. Selecting a different area deliberately converts that configuration to the ordinary real area ID.
 - Define eligibility conservatively: prefer areas with recognised, available entities so the showcase is useful, but retain their stable source ordering. Never select system-wide Energy, Security, Cameras, or Chart sources as if they were room areas.
-- Make the showcase a living compatibility fixture in Card Lab. Each new top-level profile, layout, or appearance mode must either gain a showcase card or be explicitly recorded as intentionally omitted; run the stack against rich, sparse, and fewer-than-requested-area mock homes.
+- Make the showcase a living compatibility fixture in Card Lab. Each new top-level profile, layout, appearance mode, or interaction presentation must either gain a showcase card or be explicitly recorded as intentionally omitted; run the stack against rich, sparse, and fewer-than-requested-area mock homes. Portable YAML must not guess direct entity IDs: direct-action examples belong in named Card Lab fixtures that cover standard, stacked, and tower widths.
 
 **Done when:** a user can paste one supported vertical stack into a dashboard, immediately see a representative set of cards based on their own installation, and maintainers have a clear test/checklist whenever the feature set grows.
 
@@ -378,6 +421,13 @@ Refresh the README alongside the first release containing the roadmap work:
 - Document aggregate matching at a high level: Home Assistant metadata is preferred; contributors are inspectable.
 - Update screenshots only when they reflect the released card exactly.
 - Keep the README lean; detailed implementation history belongs in release notes, not the front page.
+
+### YAML configuration reference
+
+- Add a concise, complete YAML option reference to the README or a dedicated linked reference page. It should make the card approachable without turning the front page into implementation documentation.
+- Use [Mini Graph Card's Card options table](https://github.com/kalkih/mini-graph-card) as the usability benchmark: one clear row per supported option, with at least **Name**, **Type**, **Default**, and a plain-language **Description**. A compatibility or “since” column may be useful where it prevents ambiguity.
+- Group the reference by top-level card settings, profile/layout, title and status, insights, membership, actions and toggle presentation, appearance, full charts, and mini charts. Link out to short, task-focused examples instead of embedding long YAML in every row.
+- Derive or validate the reference from the TypeScript configuration types and fixture coverage so it stays accurate as the card grows. This is a documentation-structure reference only; Area Glance should not copy Mini Graph Card's schema.
 
 ## Explicitly deferred
 

@@ -166,7 +166,39 @@ export interface ActionConfig {
   navigation_path?: string;
   service?: string;
   data?: Record<string, unknown>;
-  confirmation?: string;
+}
+
+/**
+ * A deliberately restrained history treatment for one ordinary insight slot.
+ * It can follow one direct source, an Energy Dashboard source, or a bounded
+ * numeric aggregate whose contributors are reconstructed from Recorder data.
+ * Categorical and visual-only insights deliberately retain their normal view.
+ */
+export interface MiniChartConfig {
+  type?: "line" | "area" | "columns";
+  range?: "6h" | "24h" | "48h" | "7d" | "14d" | "30d";
+  /** Automatic keeps short trends detailed and uses Recorder statistics for
+   * longer windows, avoiding an expensive sparse raw-history request. */
+  history_source?: "auto" | "raw" | "statistics";
+  line_style?: "straight" | "stepped";
+  /** Stroke width for line and area trends, in CSS pixels. */
+  line_thickness?: number;
+  /** A muted fill is useful for a trend, but can be removed for a pure sparkline. */
+  show_area?: boolean;
+  color?: string;
+  negative_color?: string;
+  fill_opacity?: number;
+  /** Columns and signed trends can keep their zero reference visible. */
+  show_baseline?: boolean;
+  /** The ordinary compact label can instead repeat the current source value. */
+  value_display?: "none" | "overlay" | "below";
+  /** Placement for an overlaid current value. Ignored when the value is below or hidden. */
+  value_position?: "bottom_left" | "top_left" | "centre" | "top_right" | "bottom_right";
+  /** Compare the current calendar day against the preceding day on one 24-hour axis. */
+  comparison?: "today_yesterday";
+  /** The two comparison traces intentionally have their own colours. */
+  comparison_current_color?: string;
+  comparison_previous_color?: string;
 }
 
 /** Membership settings for an automatic area or whole-home aggregate. */
@@ -237,6 +269,19 @@ export interface MetricConfig extends ActionConfig {
   vacuum_display?: "state" | "battery" | "fan_speed";
   /** Camera segments can remain compact or use the entire insight slot for the live preview. */
   camera_display?: "state" | "feed";
+  /** Replaces the ordinary icon/value visual with a compact, truthful trend. */
+  mini_chart?: MiniChartConfig;
+  /**
+   * Show a selected toggle action as a compact switch in the insight slot.
+   * `tap` uses the card's tap action; `hold` uses its hold action. This is
+   * deliberately presentation-only: the action remains the source of truth.
+   */
+  display_as_toggle?: "tap" | "hold";
+  /**
+   * Legacy direct-control setting retained for existing dashboards. New
+   * configurations should use `display_as_toggle` beside a Toggle action.
+   */
+  inline_control?: "auto" | "toggle";
   /** Clock segments can show a numeric time or a live analogue clock face. */
   clock_style?: "digital" | "analogue";
   decimals?: number;
@@ -244,7 +289,7 @@ export interface MetricConfig extends ActionConfig {
   show_unit?: boolean;
   show_icon?: boolean;
   show_label?: boolean;
-  label_mode?: "preset" | "entity" | "custom";
+  label_mode?: "preset" | "entity" | "state" | "custom";
   format?: "auto" | "number" | "temperature" | "percent" | "power";
   hide_unavailable?: boolean;
   hidden?: boolean;
@@ -269,7 +314,7 @@ export interface AreaGlanceConfig extends ActionConfig {
   /** Controls whether the status and its time are kept together or shown on separate lines. */
   header_status_lines?: "auto" | "single" | "multi";
   height?: "slim" | "compact" | "standard" | "comfortable";
-  profile?: "auto" | "room" | "media" | "battery" | "energy" | "house" | "security" | "cameras" | "chart";
+  profile?: "auto" | "room" | "media" | "battery" | "energy" | "house" | "security" | "cameras" | "mini_charts" | "chart";
   appearance?: {
     preset?: "theme" | "light" | "slate" | "charcoal" | "custom";
     /** Shared typography weight for the title and insight text. */
@@ -285,6 +330,8 @@ export interface AreaGlanceConfig extends ActionConfig {
      * (including threshold and state rules) continue to take priority.
      */
     insight_icon_color?: "default" | "black" | "grey";
+    /** Shared default colour for inline-control toggle tracks. A metric colour still overrides it. */
+    toggle_color?: string;
     /** Optional MDI override for the Light-style header icon. */
     area_icon?: string;
     background?: string;

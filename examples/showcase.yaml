@@ -35,6 +35,12 @@ cards:
       shadow_style: none
       corner_radius: 16
 
+  # Action-led toggles deliberately remain opt-in: a portable example cannot
+  # know the entity ID of a controllable light or switch in another home. In
+  # the editor, choose Toggle this entity for a tap or hold action, then turn
+  # on Display as toggle. The Card Lab showcase exercises this presentation in
+  # both normal and narrow tower layouts.
+
   # A grid keeps the tower at a compact half-width alongside another
   # full-height card. Tower icons are intentionally left enabled.
   - type: grid
